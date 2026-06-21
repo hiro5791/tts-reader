@@ -1,0 +1,5 @@
+# メイン環境（app.py と Qwen3-TTS 用）に入れるもの。
+# torch は CUDA 版を別コマンドで入れるため、ここには書かない（README参照）。
+qwen-tts
+soundfile
+gradio
