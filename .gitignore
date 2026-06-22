@@ -1,0 +1,80 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# ===== 仮想環境 =====
+.venv/
+venv/
+env/
+ENV/
+
+# ===== モデル・重み（巨大。GitHubの100MB制限を超えるので絶対に入れない）=====
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.onnx
+models/
+checkpoints/
+weights/
+
+# ===== Hugging Face / モデルキャッシュ =====
+.cache/
+huggingface/
+hf_cache/
+~/.cache/huggingface/
+
+# ===== 外部リポジトリ（Irodori 等を clone してくる場合）=====
+vendor/
+Irodori-TTS/
+third_party/
+
+# ===== 生成された音声・出力物 =====
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+outputs/
+output/
+generated/
+tmp/
+temp/
+
+# ===== 参照音声・ボイスライブラリ（権利物を誤って公開しないため）=====
+voices/
+reference_audio/
+speakers/
+
+# ===== アプリのローカル状態・ユーザーデータ =====
+window_state.json
+
+# ===== 設定・秘密情報 =====
+.env
+*.local
+config.local.*
+settings.local.json
+
+# ===== exe化（PyInstaller）=====
+*.spec
+build/
+dist/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== エディタ =====
+.vscode/
+.idea/
+*.swp
+*~
