@@ -66,6 +66,26 @@ translations = {
         "status_no_audio": "まだ音声がありません。先に「生成」を押してください。",
         "status_wave_error": "音声はできましたが、波形の表示でエラー: {msg}",
         "status_play_error": "再生でエラー: {msg}",
+        # 声タブ（プリセット／保存した声）
+        "tab_preset": "プリセット",
+        "tab_saved": "保存した声",
+        "btn_pick_mvsvoice": "ファイルを選択",
+        "dnd_hint": "ここに .mvsvoice をドラッグ＆ドロップ",
+        "saved_file_label": "ファイル名：{name}",
+        "saved_file_added": "✅ ファイルを追加しました：{name}",
+        "saved_file_bad_ext": "⚠️ .mvsvoice ファイルだけ追加できます。",
+        "saved_file_too_many": "⚠️ 追加できるファイルは1個までです。",
+        "saved_file_need": "⚠️ 先に .mvsvoice ファイルを選んでください。",
+        # 音声を保存する（wav / mp3）
+        "btn_save_audio_file": "音声を保存する",
+        "save_audio_no_audio": "⚠️ 先に音声を生成してください。",
+        "save_audio_done": "✅ 音声を保存しました（wav / mp3）: {path}",
+        "save_audio_error": "❌ 音声の保存に失敗しました:\n{msg}",
+        # 声を保存する（.mvsvoice）
+        "btn_save_voice_file": "声を保存する",
+        "save_voice_no_audio": "⚠️ 先に音声を生成してください（その音声を声として保存します）。",
+        "save_voice_done": "✅ 声を保存しました: {path}",
+        "save_voice_error": "❌ 声の保存に失敗しました:\n{msg}",
         # 声の表示名（話者名は固定表記、属性は表示言語で訳す）
         "voice_ono_anna": "おの あんな（女性・日本語ネイティブ）",
         "voice_serena": "セレナ（女性・やさしい）",
@@ -118,6 +138,26 @@ translations = {
         "status_no_audio": "No audio yet. Press Generate first.",
         "status_wave_error": "The audio was created, but drawing the waveform failed: {msg}",
         "status_play_error": "Playback error: {msg}",
+        # Voice tabs (preset / saved)
+        "tab_preset": "Preset",
+        "tab_saved": "Saved voices",
+        "btn_pick_mvsvoice": "Choose file",
+        "dnd_hint": "Drag & drop a .mvsvoice here",
+        "saved_file_label": "File name: {name}",
+        "saved_file_added": "✅ File added: {name}",
+        "saved_file_bad_ext": "⚠️ Only .mvsvoice files can be added.",
+        "saved_file_too_many": "⚠️ Only one file can be added.",
+        "saved_file_need": "⚠️ Please choose a .mvsvoice file first.",
+        # Save audio (wav / mp3)
+        "btn_save_audio_file": "Save audio",
+        "save_audio_no_audio": "⚠️ Generate audio first.",
+        "save_audio_done": "✅ Audio saved (wav / mp3): {path}",
+        "save_audio_error": "❌ Failed to save the audio:\n{msg}",
+        # Save voice (.mvsvoice)
+        "btn_save_voice_file": "Save voice",
+        "save_voice_no_audio": "⚠️ Generate audio first (it will be saved as the voice).",
+        "save_voice_done": "✅ Voice saved: {path}",
+        "save_voice_error": "❌ Failed to save the voice:\n{msg}",
         # Voice display names (speaker names kept as-is; attributes translated).
         # Languages without their own entries fall back to these English labels.
         "voice_ono_anna": "Ono Anna (female, Japanese-native)",

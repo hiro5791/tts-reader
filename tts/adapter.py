@@ -86,3 +86,32 @@ def synthesize(text: str, engine: str, voice: str | None = None, speed: float = 
     if language is None:
         language = module.DEFAULT_LANGUAGE
     return module.synthesize(text, voice=voice, speed=float(speed), language=language)
+
+
+def synthesize_clone(engine: str, text: str, ref_wav: str, ref_text: str | None = None,
+                     language: str | None = None, speed: float = 1.0) -> str:
+    """参照音声（ref_wav）のクローンで生成する共通の窓口（「保存した声」用）。
+
+    engine に応じて各エンジンのクローン経路に振り分ける:
+      - qwen3   … Base モデルの generate_voice_clone（別チェックポイント）
+      - irodori … infer.py --ref-wav（日本語のみ）
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("読み上げる文章が空です。テキストを入力してください。")
+
+    if engine == "qwen3":
+        from . import clone_engine
+        if language is None:
+            language = clone_engine.DEFAULT_LANGUAGE
+        return clone_engine.synthesize_clone(
+            text, ref_wav=ref_wav, ref_text=ref_text, language=language, speed=float(speed),
+        )
+    if engine == "irodori":
+        from . import irodori_engine
+        if language is None:
+            language = irodori_engine.DEFAULT_LANGUAGE
+        return irodori_engine.synthesize_clone(
+            text, ref_wav=ref_wav, ref_text=ref_text, language=language, speed=float(speed),
+        )
+    raise ValueError(f"知らないエンジンです: {engine!r}")

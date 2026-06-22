@@ -3,3 +3,4 @@
 qwen-tts
 soundfile
 gradio
+tkinterdnd2   # 「保存した声」タブのファイルドラッグ&ドロップ

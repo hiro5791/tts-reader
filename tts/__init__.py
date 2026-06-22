@@ -5,6 +5,7 @@
 
 from .adapter import (
     synthesize,
+    synthesize_clone,
     list_voices,
     default_voice,
     list_languages,
@@ -14,6 +15,7 @@ from .adapter import (
 
 __all__ = [
     "synthesize",
+    "synthesize_clone",
     "list_voices",
     "default_voice",
     "list_languages",

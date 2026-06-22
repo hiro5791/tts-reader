@@ -105,6 +105,52 @@ def list_languages() -> list[tuple[str, str]]:
     return list(LANGUAGES)
 
 
+def _run_infer(checkpoint: str, text: str, voice_args: list[str], speed: float,
+               tag: str = "") -> str:
+    """infer.py を実行して wav を書き出し、そのパスを返す（共通処理）。"""
+    if not IRODORI_DIR.exists():
+        raise FileNotFoundError(
+            "Irodori-TTS がまだ用意されていません。\n"
+            f"（{IRODORI_DIR} が見つかりません）\n"
+            "先に scripts/setup_irodori を実行して、Irodori を準備してください。"
+        )
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_path = OUTPUT_DIR / f"irodori_{stamp}.wav"
+
+    # 速度 → duration-scale（>1 で長く=遅く、<1 で短く=速く）。速度の逆数を渡す。
+    speed = max(0.1, float(speed))
+    duration_scale = round(1.0 / speed, 3)
+
+    uv = _find_uv()
+    uv_prefix = [uv] if uv else [sys.executable, "-m", "uv"]
+    cmd = [
+        *uv_prefix, "run", "--no-sync", "python", "infer.py",
+        "--hf-checkpoint", checkpoint,
+        "--text", text,
+        *voice_args,
+        "--duration-scale", str(duration_scale),
+        "--output-wav", str(out_path),
+    ]
+    print(f"[Irodori] 実行（{tag}, モデル={checkpoint}, 速度={speed}, "
+          f"duration-scale={duration_scale}） ...（初回はモデル読み込みで時間がかかります）")
+
+    result = subprocess.run(
+        cmd, cwd=str(IRODORI_DIR), capture_output=True,
+        text=True, encoding="utf-8", errors="replace",
+    )
+
+    if result.returncode != 0 or not out_path.exists():
+        raise RuntimeError(
+            "Irodori-TTS の実行に失敗しました。\n"
+            f"--- 標準出力 ---\n{result.stdout[-2000:]}\n"
+            f"--- エラー出力 ---\n{result.stderr[-2000:]}"
+        )
+    print(f"[Irodori] 音声を書き出しました（{tag}, 速度={speed}）: {out_path}")
+    return str(out_path)
+
+
 def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
                language: str = DEFAULT_LANGUAGE) -> str:
     """日本語テキストを Irodori-TTS で読み上げ、wav ファイルのパスを返す。
@@ -113,26 +159,9 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
     speed    … 1.0 が等倍。Irodori 側の --duration-scale で速度を変える（ピッチ保持）。
     language … 互換のため受け取るが、Irodori は日本語のみ対応のため使わない。
     """
-    if not IRODORI_DIR.exists():
-        raise FileNotFoundError(
-            "Irodori-TTS がまだ用意されていません。\n"
-            f"（{IRODORI_DIR} が見つかりません）\n"
-            "先に scripts/setup_irodori を実行して、Irodori を準備してください。"
-        )
-
     if voice not in VOICES:
         voice = DEFAULT_VOICE
     cfg = VOICES[voice]
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"irodori_{stamp}.wav"
-
-    # 速度 → duration-scale に変換する。
-    # duration-scale は「>1 で長く（遅く）、<1 で短く（速く）」なので、
-    # 速度の逆数を渡す（speed=2.0 → duration_scale=0.5 で2倍速）。
-    speed = max(0.1, float(speed))
-    duration_scale = round(1.0 / speed, 3)
 
     # 声の種類に応じて、使うモデルと引数を切り替える。
     #   caption あり … VoiceDesign モデルで「説明文どおりの声」を作る（--caption ... --no-ref）
@@ -152,37 +181,17 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
                 raise FileNotFoundError(f"参照音声が見つかりません: {ref_path}")
             voice_args = ["--ref-wav", str(ref_path)]
 
-    # uv 管理の環境で infer.py を実行する
-    uv = _find_uv()
-    uv_prefix = [uv] if uv else [sys.executable, "-m", "uv"]
-    cmd = [
-        *uv_prefix, "run", "--no-sync", "python", "infer.py",
-        "--hf-checkpoint", checkpoint,
-        "--text", text,
-        *voice_args,
-        "--duration-scale", str(duration_scale),
-        "--output-wav", str(out_path),
-    ]
-    print(f"[Irodori] 実行（声={voice}, モデル={checkpoint}, 速度={speed}, "
-          f"duration-scale={duration_scale}）"
-          " ...（初回はモデル読み込みで時間がかかります）")
+    return _run_infer(checkpoint, text, voice_args, speed, tag=f"声={voice}")
 
-    result = subprocess.run(
-        cmd,
-        cwd=str(IRODORI_DIR),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
 
-    if result.returncode != 0 or not out_path.exists():
-        # 失敗の中身を分かる形で投げる（UI でそのまま見える）
-        raise RuntimeError(
-            "Irodori-TTS の実行に失敗しました。\n"
-            f"--- 標準出力 ---\n{result.stdout[-2000:]}\n"
-            f"--- エラー出力 ---\n{result.stderr[-2000:]}"
-        )
+def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
+                     language: str = DEFAULT_LANGUAGE, speed: float = 1.0) -> str:
+    """参照音声（ref_wav）のクローンで読み上げる。Irodori は日本語のみ。
 
-    print(f"[Irodori] 音声を書き出しました（声={voice}, 速度={speed}）: {out_path}")
-    return str(out_path)
+    infer.py に --ref-wav を渡して、基本Irodoriモデルでクローン生成する。
+    ref_text / language は受け取るが、Irodori 側では使わない。
+    """
+    if not Path(ref_wav).exists():
+        raise FileNotFoundError(f"参照音声が見つかりません: {ref_wav}")
+    voice_args = ["--ref-wav", str(ref_wav)]
+    return _run_infer(HF_CHECKPOINT, text, voice_args, speed, tag="クローン(ref)")

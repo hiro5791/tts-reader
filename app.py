@@ -28,12 +28,19 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import json
 import time
 import queue
+import zipfile
+import tempfile
+import datetime as _dt
 import threading
 from pathlib import Path
+import tkinter as tk
+from tkinter import filedialog
+from tkinterdnd2 import TkinterDnD, DND_FILES
 
 # Windows のコンソール文字コード（cp932）で日本語の print が落ちないようにする
 for _stream in (sys.stdout, sys.stderr):
@@ -41,6 +48,13 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8")
     except Exception:
         pass
+
+# オフライン同梱配布用：MVS_OFFLINE=1 のとき、モデルのダウンロードを試みず
+# ローカルキャッシュだけを使う（ネットが無くても起動・生成できる）。
+# モデルを HF から取り込むより前（ここ）で設定しておく必要がある。
+if os.environ.get("MVS_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 
 import numpy as np
 import customtkinter as ctk
@@ -55,7 +69,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 import i18n
 from tts import (
-    synthesize, list_voices, default_voice,
+    synthesize, synthesize_clone, list_voices, default_voice,
     list_languages, default_language, ENGINES,
 )
 from tts import player
@@ -153,9 +167,14 @@ def _apply_windows_theme():
 _apply_windows_theme()
 
 
-class TTSApp(ctk.CTk):
+class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def __init__(self):
         super().__init__()
+        # ファイルのドラッグ&ドロップを使えるようにする（tkdnd を読み込む）
+        try:
+            self.TkdndVersion = TkinterDnD._require(self)
+        except Exception:
+            self.TkdndVersion = None
         self.title("Multi Voice Studio")
         self.minsize(*MIN_SIZE)
         self._apply_saved_geometry()
@@ -185,6 +204,8 @@ class TTSApp(ctk.CTk):
         self._audio_lang_items: list[tuple[str, str]] = []   # (表示名キー, 言語名)
         self._audio_lang_map: dict[str, str] = {}            # 表示名 -> 言語名（現在の言語）
         self._current_audio_lang: str | None = None
+        self._saved_voice_file: str | None = None   # 「保存した声」タブに追加された .mvsvoice（1個まで）
+        self._mvsvoice_cache: tuple | None = None    # (path, ref_wav, ref_text, language) の展開キャッシュ
         self._result_queue: "queue.Queue" = queue.Queue()
 
         # ステータスは「キー＋差し込み値」で覚えておき、言語切替時に貼り替える
@@ -293,7 +314,6 @@ class TTSApp(ctk.CTk):
 
     # ---- 画面の組み立て -----------------------------------------------------
     def _build_widgets(self):
-        pad = {"padx": 16, "pady": (8, 0)}
 
         # 上部バー：エンジン選択（左・ラベルなし）／言語切り替え（右）
         top = ctk.CTkFrame(self, fg_color="transparent")
@@ -317,17 +337,46 @@ class TTSApp(ctk.CTk):
         )
         self.audio_lang_menu.pack(side="left", padx=(8, 0))
 
-        # テキスト入力
-        self.lbl_text = ctk.CTkLabel(self, text="")
-        self.lbl_text.pack(anchor="w", padx=16, pady=(8, 0))
+        # テキスト入力（ラベルなし）
         self.text_box = ctk.CTkTextbox(self, height=120, wrap="word")
-        self.text_box.pack(fill="both", expand=True, padx=16, pady=(2, 0))
+        self.text_box.pack(fill="both", expand=True, padx=16, pady=(10, 0))
 
-        # 声の選択
-        self.lbl_voice = ctk.CTkLabel(self, text="")
-        self.lbl_voice.pack(anchor="w", **pad)
-        self.voice_menu = ctk.CTkOptionMenu(self, values=["—"], command=self._on_voice_change)
-        self.voice_menu.pack(anchor="w", padx=16, pady=(2, 0))
+        # 声：タブ方式（「プリセット」「保存した声」）。タブで自然に排他になる。
+        # 将来タブを増やすときは self._voice_tab_keys に i18n キーを足すだけでよい。
+        # anchor="nw" でタブ見出しを左寄せ（他の要素の左端にそろえる）。
+        self._voice_tab_keys = ["tab_preset", "tab_saved"]   # ← ここに足せばタブが増える
+        self.voice_tabview = ctk.CTkTabview(self, height=150, anchor="nw",
+                                            command=self._on_voice_tab_change)
+        self.voice_tabview.pack(fill="x", padx=16, pady=(8, 0))
+        self._voice_tab_names = {}
+        for _k in self._voice_tab_keys:
+            _name = self._t(_k)
+            self.voice_tabview.add(_name)
+            self._voice_tab_names[_k] = _name
+        # プリセットタブ：今ある「声」のプルダウン（おの あんな 等）
+        preset_tab = self.voice_tabview.tab(self._voice_tab_names["tab_preset"])
+        self.voice_menu = ctk.CTkOptionMenu(preset_tab, values=["—"],
+                                            command=self._on_voice_change)
+        self.voice_menu.pack(anchor="w", padx=4, pady=4)
+        # 保存した声タブ：ファイル選択／ドラッグ&ドロップ（.mvsvoice を1個まで）
+        saved_tab = self.voice_tabview.tab(self._voice_tab_names["tab_saved"])
+        # 上段：「ファイルを選択」ボタン＋その右にファイル名（フルパス）
+        pick_row = ctk.CTkFrame(saved_tab, fg_color="transparent")
+        pick_row.pack(fill="x", padx=4, pady=(4, 0))
+        self.btn_pick_mvsvoice = ctk.CTkButton(pick_row, text="", width=120,
+                                               command=self._on_pick_mvsvoice)
+        self.btn_pick_mvsvoice.pack(side="left")
+        self.lbl_saved_file = ctk.CTkLabel(pick_row, text="", anchor="w")
+        self.lbl_saved_file.pack(side="left", padx=(8, 0), fill="x", expand=True)
+        # 下段：ドロップ領域（素の tk.Label。tkinterdnd2 でドロップを受ける）
+        self.dnd_zone = tk.Label(saved_tab, text="", relief="groove", bd=1,
+                                 height=2, fg="#666666", bg="#f5f5f5")
+        self.dnd_zone.pack(fill="x", padx=4, pady=(6, 0))
+        try:
+            self.dnd_zone.drop_target_register(DND_FILES)
+            self.dnd_zone.dnd_bind("<<Drop>>", self._on_drop_mvsvoice)
+        except Exception:
+            pass   # DnD が使えない環境では「ファイルを選択」だけ使える
 
         # 速度
         speed_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -361,6 +410,22 @@ class TTSApp(ctk.CTk):
         self._fig.subplots_adjust(left=0.04, right=0.96, top=0.92, bottom=0.22)
         self._canvas = FigureCanvasTkAgg(self._fig, master=wave_frame)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
+        # 生成中インジケータ（処理中アニメーション）。波形エリアの中央に重ねて表示。
+        # 普段は隠し、生成中だけ _set_state で表示してアニメーションさせる。
+        self._busy_bar = ctk.CTkProgressBar(wave_frame, mode="indeterminate")
+
+        # 「声を保存する」ボタン：波形の枠の外（下の白い部分）に置く
+        save_row = ctk.CTkFrame(self, fg_color="transparent")
+        save_row.pack(fill="x", padx=16, pady=(6, 0))
+        # 並び：左から「声を保存する」→「音声を保存する」
+        self.btn_save_audio_file = ctk.CTkButton(
+            save_row, text="", width=120, height=28, command=self._on_save_audio_file
+        )
+        self.btn_save_audio_file.pack(side="right")
+        self.btn_save_voice_file = ctk.CTkButton(
+            save_row, text="", width=120, height=28, command=self._on_save_voice_file
+        )
+        self.btn_save_voice_file.pack(side="right", padx=(0, 8))
 
         # 状態表示
         self.status_label = ctk.CTkLabel(
@@ -382,10 +447,20 @@ class TTSApp(ctk.CTk):
         self.lang_btn.set(i18n.LANGUAGES[lang])
 
         # ラベル類
-        self.lbl_text.configure(text=self._t("label_text"))
         self.lbl_audio_lang.configure(text=self._t("label_audio_language"))
-        self.lbl_voice.configure(text=self._t("label_voice"))
         self.lbl_speed.configure(text=self._t("label_speed"))
+
+        # 声タブの見出し（タブ名）と「保存した声」のプレースホルダーを言語に合わせる
+        for _k in self._voice_tab_keys:
+            _new = self._t(_k)
+            _old = self._voice_tab_names[_k]
+            if _new != _old:
+                self.voice_tabview.rename(_old, _new)
+                self._voice_tab_names[_k] = _new
+        # 「保存した声」タブの中身（ボタン・ドロップ案内・ファイル名表示）
+        self.btn_pick_mvsvoice.configure(text=self._t("btn_pick_mvsvoice"))
+        self.dnd_zone.configure(text=self._t("dnd_hint"))
+        self._refresh_saved_file_label()
 
         # 声・音声言語プルダウンの中身（各項目＋選択中の表示）も新しい言語で作り直す
         self._relabel_voices()
@@ -394,6 +469,8 @@ class TTSApp(ctk.CTk):
         # 再生・停止ボタン（生成ボタンの文字は状態によるので _set_state で）
         self.play_btn.configure(text=self._t("btn_play"))
         self.stop_btn.configure(text=self._t("btn_stop"))
+        self.btn_save_voice_file.configure(text=self._t("btn_save_voice_file"))
+        self.btn_save_audio_file.configure(text=self._t("btn_save_audio_file"))
         self._set_state(self._state)  # 生成ボタンの文字を今の状態に合わせて貼り直す
 
         # 速度の数値表示
@@ -564,6 +641,137 @@ class TTSApp(ctk.CTk):
             text=self._t("speed_value", v=round(float(value), 1))
         )
 
+    # ---- 「保存した声」タブ：.mvsvoice の追加（選択／ドラッグ&ドロップ）-----
+    def _refresh_saved_file_label(self):
+        """追加された .mvsvoice のファイル名（フルパス）ラベルを更新する。"""
+        if self._saved_voice_file:
+            self.lbl_saved_file.configure(
+                text=self._t("saved_file_label", name=self._saved_voice_file)
+            )
+        else:
+            self.lbl_saved_file.configure(text="")
+
+    def _on_pick_mvsvoice(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            filetypes=[("Multi Voice Studio voice", "*.mvsvoice")],
+        )
+        if path:
+            self._add_mvsvoice(path)
+
+    def _on_drop_mvsvoice(self, event):
+        # tkinterdnd2 のドロップイベント（メインスレッド）。複数パスを安全に分解する。
+        try:
+            paths = list(self.tk.splitlist(event.data))
+        except Exception:
+            paths = [event.data] if event.data else []
+        self._handle_dropped(paths)
+
+    def _handle_dropped(self, paths):
+        if len(paths) > 1:   # ファイルは1個まで
+            self._set_status("saved_file_too_many", error=True)
+            return
+        if paths:
+            self._add_mvsvoice(paths[0])
+
+    def _add_mvsvoice(self, path: str):
+        """.mvsvoice だけ受け付けて1個保持し、ファイル名（フルパス）を表示する。"""
+        if Path(path).suffix.lower() != ".mvsvoice":
+            self._set_status("saved_file_bad_ext", error=True)
+            return
+        self._saved_voice_file = path
+        self._mvsvoice_cache = None        # 別ファイルなので展開キャッシュを捨てる
+        self._refresh_saved_file_label()
+        self._set_state(self._state)       # 生成ボタンの有効/無効を更新（ファイルが入った）
+        self._set_status("saved_file_added", name=path)
+
+    def _on_voice_tab_change(self, *_):
+        # タブを切り替えたら、生成ボタンの有効/無効を選択タブに合わせて更新する
+        self._set_state(self._state)
+
+    def _extract_mvsvoice(self, path: str):
+        """.mvsvoice（zip）を展開し、(参照wavパス, ref_text, language) を返す。
+
+        必須（reference.wav 相当＋voice.json の name/ref_text）が無ければエラー。
+        同じファイルなら展開結果をキャッシュして使い回す。
+        """
+        if self._mvsvoice_cache and self._mvsvoice_cache[0] == path:
+            return self._mvsvoice_cache[1:]
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            if "voice.json" not in names:
+                raise ValueError("voice.json がありません（壊れた .mvsvoice です）。")
+            meta = json.loads(z.read("voice.json").decode("utf-8"))
+            audio_name = meta.get("audio_file", "reference.wav")
+            if audio_name not in names:
+                raise ValueError(f"参照音声 {audio_name} がありません（壊れた .mvsvoice です）。")
+            tmpdir = tempfile.mkdtemp(prefix="mvsvoice_")
+            z.extract(audio_name, tmpdir)
+            ref_wav = os.path.join(tmpdir, audio_name)
+        ref_text = meta.get("ref_text") or None
+        language = meta.get("language") or None
+        self._mvsvoice_cache = (path, ref_wav, ref_text, language)
+        return ref_wav, ref_text, language
+
+    # ---- 音声を保存する（読み上げた音声を wav と mp3 で書き出す）-----------
+    def _on_save_audio_file(self):
+        """直近に生成した読み上げ音声を、wav と mp3 の両方で保存する。"""
+        if self._wav_data is None or not self.current_wav:
+            self._set_status("save_audio_no_audio", error=True)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".wav",
+            filetypes=[("WAV / MP3", "*.wav *.mp3"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        import soundfile as sf
+        base = Path(path).with_suffix("")   # 拡張子を外し、wav と mp3 を並べて書き出す
+        wav_path = str(base) + ".wav"
+        mp3_path = str(base) + ".mp3"
+        try:
+            sf.write(wav_path, self._wav_data, self._wav_sr)
+            sf.write(mp3_path, self._wav_data, self._wav_sr, format="MP3")
+        except Exception as e:
+            self._set_status("save_audio_error", error=True, msg=str(e))
+            return
+        self._set_status("save_audio_done", path=str(base))
+
+    # ---- 声を保存する（.mvsvoice として書き出す）---------------------------
+    def _on_save_voice_file(self):
+        """直近に生成した音声を参照音声として、.mvsvoice（zip）に書き出す。"""
+        if not self.current_wav or not Path(self.current_wav).exists():
+            self._set_status("save_voice_no_audio", error=True)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".mvsvoice",
+            filetypes=[("Multi Voice Studio voice", "*.mvsvoice"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        # 書き起こし（ref_text）はテキスト欄の内容。プレースホルダのままなら空にする。
+        ref_text = self.text_box.get("1.0", "end").strip()
+        placeholders = {i18n.t(c, "textbox_placeholder") for c in i18n.translations}
+        if ref_text in placeholders:
+            ref_text = ""
+        voice_json = {
+            "format_version": 1,
+            "name": Path(path).stem,
+            "ref_text": ref_text,
+            "language": self._current_audio_lang or "Japanese",
+            "audio_file": "reference.wav",
+            "note": "",
+            "created_at": _dt.date.today().isoformat(),
+        }
+        try:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as z:
+                z.write(self.current_wav, "reference.wav")
+                z.writestr("voice.json", json.dumps(voice_json, ensure_ascii=False, indent=2))
+        except Exception as e:
+            self._set_status("save_voice_error", error=True, msg=str(e))
+            return
+        self._set_status("save_voice_done", path=path)
+
     # ---- 読み上げ（別スレッド）---------------------------------------------
     def _on_speak(self):
         if self._state == STATE_GENERATING:
@@ -580,21 +788,47 @@ class TTSApp(ctk.CTk):
             pass
 
         engine = ENGINE_LABEL_TO_KEY[self.engine_btn.get()]
-        voice = self._current_voice_id
-        language = self._current_audio_lang
         speed = round(float(self.speed_slider.get()), 1)
+
+        # どちらのタブが有効かで、生成の中身（プリセット or 保存した声のクローン）を決める
+        if self._is_saved_tab_active():
+            if not self._saved_voice_file:
+                self._set_status("saved_file_need", error=True)
+                return
+            try:
+                ref_wav, ref_text, mv_lang = self._extract_mvsvoice(self._saved_voice_file)
+            except Exception as e:
+                self._set_status("status_error", error=True, msg=str(e))
+                return
+            language = mv_lang or self._current_audio_lang
+            job = (lambda: synthesize_clone(engine, text, ref_wav,
+                                            ref_text=ref_text, language=language, speed=speed))
+            voice_label = Path(self._saved_voice_file).stem
+        else:
+            voice = self._current_voice_id
+            language = self._current_audio_lang
+            job = (lambda: synthesize(text, engine, voice=voice,
+                                      speed=speed, language=language))
+            voice_label = self.voice_menu.get()
+        engine_label = ENGINE_KEY_TO_LABEL.get(engine, engine)
+
+        # 生成ボタンを押したら、前回の波形をクリアする
+        self._wav_data = None
+        self._wav_sr = None
+        self.current_wav = None
+        self._init_waveform_placeholder()
 
         self._set_state(STATE_GENERATING)
         self._set_status("status_generating")
 
         threading.Thread(
-            target=self._worker, args=(text, engine, voice, speed, language), daemon=True
+            target=self._worker, args=(job, engine_label, voice_label, speed), daemon=True
         ).start()
 
-    def _worker(self, text, engine, voice, speed, language):
+    def _worker(self, job, engine_label, voice_label, speed):
         try:
-            wav = synthesize(text, engine, voice=voice, speed=speed, language=language)
-            self._result_queue.put(("done", wav, engine, speed))
+            wav = job()
+            self._result_queue.put(("done", wav, engine_label, voice_label, speed))
         except Exception as e:
             self._result_queue.put(("error", str(e)))
 
@@ -603,15 +837,15 @@ class TTSApp(ctk.CTk):
             while True:
                 item = self._result_queue.get_nowait()
                 if item[0] == "done":
-                    _, wav, engine, speed = item
-                    self._on_generation_done(wav, engine, speed)
+                    _, wav, engine_label, voice_label, speed = item
+                    self._on_generation_done(wav, engine_label, voice_label, speed)
                 elif item[0] == "error":
                     self._on_generation_error(item[1])
         except queue.Empty:
             pass
         self.after(100, self._poll_result)
 
-    def _on_generation_done(self, wav, engine, speed):
+    def _on_generation_done(self, wav, engine_label, voice_label, speed):
         self.current_wav = wav
         try:
             data, sr = player.load(wav)
@@ -623,8 +857,6 @@ class TTSApp(ctk.CTk):
             self._set_status("status_wave_error", error=True, msg=str(e))
             return
 
-        engine_label = ENGINE_KEY_TO_LABEL.get(engine, engine)
-        voice_label = self.voice_menu.get()
         self._start_playback("status_done_playing",
                              engine=engine_label, voice=voice_label, speed=speed)
 
@@ -691,17 +923,45 @@ class TTSApp(ctk.CTk):
             self._cursor_after_id = None
 
     # ---- 状態とステータス ---------------------------------------------------
+    def _is_saved_tab_active(self) -> bool:
+        """「保存した声」タブが選ばれているか。"""
+        try:
+            return self.voice_tabview.get() == self._voice_tab_names["tab_saved"]
+        except Exception:
+            return False
+
     def _set_state(self, state: str):
         self._state = state
         speak_on = state in (STATE_IDLE, STATE_READY, STATE_PLAYING)
+        # 「保存した声」タブのときは、ファイルが選ばれていないと生成できない
+        if self._is_saved_tab_active() and self._saved_voice_file is None:
+            speak_on = False
         play_on = state == STATE_READY
         stop_on = state == STATE_PLAYING
+        # 生成中・再生中はエンジン／声を変えられないようにする（待機中だけ操作可）
+        controls_on = state in (STATE_IDLE, STATE_READY)
         self.speak_btn.configure(
             state="normal" if speak_on else "disabled",
             text=self._t("btn_generating") if state == STATE_GENERATING else self._t("btn_generate"),
         )
         self.play_btn.configure(state="normal" if play_on else "disabled")
         self.stop_btn.configure(state="normal" if stop_on else "disabled")
+        self.engine_btn.configure(state="normal" if controls_on else "disabled")
+        self.voice_menu.configure(state="normal" if controls_on else "disabled")
+        # 生成中・再生中はタブ（プリセット／保存した声）の切り替えも無効化
+        self.voice_tabview.configure(state="normal" if controls_on else "disabled")
+        # 保存ボタンは、保存するもの（生成済み音声）が無いときは無効
+        save_on = self._wav_data is not None
+        self.btn_save_audio_file.configure(state="normal" if save_on else "disabled")
+        self.btn_save_voice_file.configure(state="normal" if save_on else "disabled")
+
+        # 生成中は波形エリアに「処理中」のアニメーションを重ねて表示する
+        if state == STATE_GENERATING:
+            self._busy_bar.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.6)
+            self._busy_bar.start()
+        else:
+            self._busy_bar.stop()
+            self._busy_bar.place_forget()
 
     def _set_status(self, key: str, error: bool = False, **params):
         self._status_key = key
