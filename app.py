@@ -35,6 +35,7 @@ import time
 import queue
 import zipfile
 import tempfile
+import webbrowser
 import datetime as _dt
 import threading
 from pathlib import Path
@@ -93,6 +94,12 @@ AUDIO_LANG_TO_I18N = {
     "Spanish": "es",
     "Italian": "it",
 }
+
+# アプリ名・バージョン・問題報告先（情報ダイアログで使う）
+APP_NAME = "Multi Voice Studio"
+APP_VERSION = "1.0.0"
+# 「問題を報告」ボタンから開く Google フォーム
+REPORT_FORM_URL = "https://forms.gle/7ci3VpBVVA4jcw8U7"
 
 # ウィンドウのサイズ・位置を覚えておくファイル
 WINDOW_STATE_FILE = Path(__file__).resolve().parent / "window_state.json"
@@ -184,7 +191,7 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.TkdndVersion = TkinterDnD._require(self)
         except Exception:
             self.TkdndVersion = None
-        self.title("Multi Voice Studio")
+        self.title(APP_NAME)
         self.minsize(*MIN_SIZE)
         self._apply_saved_geometry()
 
@@ -336,14 +343,17 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     # ---- 画面の組み立て -----------------------------------------------------
     def _build_widgets(self):
 
-        # 上部バー：エンジン選択（左・ラベルなし）／言語切り替え（右）
+        # 上部バー：エンジン選択（左・ラベルなし）／情報ボタン・言語切り替え（右）
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=16, pady=(12, 0))
+        # 情報ボタンは右上の一番端。押すとアプリ名・バージョン・問題報告のダイアログを出す。
+        self.info_btn = ctk.CTkButton(top, text="", width=80, command=self._show_info)
+        self.info_btn.pack(side="right")
         self.lang_btn = ctk.CTkOptionMenu(
             top, values=self._lang_labels_sorted, command=self._on_language_change
         )
         self.lang_btn.set(i18n.LANGUAGES[self._lang])
-        self.lang_btn.pack(side="right")
+        self.lang_btn.pack(side="right", padx=(0, 8))
         self.engine_btn = ctk.CTkSegmentedButton(
             top, values=list(ENGINE_LABEL_TO_KEY.keys()), command=self._on_engine_change
         )
@@ -561,6 +571,7 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.lbl_pitch.configure(text=self._t("label_pitch"))
         self.btn_open_file.configure(text=self._t("btn_open_file"))
         self.chk_append.configure(text=self._t("chk_append"))
+        self.info_btn.configure(text=self._t("btn_info"))
 
         # 声タブの見出し（タブ名）を言語に合わせて貼り替える
         for _k in self._voice_tab_keys:
@@ -791,10 +802,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     # ---- ファイル読み込み（txt / PDF / Word → テキスト欄）-------------------
     def _on_open_file(self):
         path = filedialog.askopenfilename(
-            parent=self,
-            filetypes=[("テキスト/PDF/Word", "*.txt *.pdf *.docx"),
-                       ("Text", "*.txt"), ("PDF", "*.pdf"), ("Word", "*.docx"),
-                       ("All files", "*.*")],
+            parent=self, title=self._t("btn_open_file"),
+            filetypes=[(self._t("ft_doc"), "*.txt *.pdf *.docx"),
+                       (self._t("ft_text"), "*.txt"), ("PDF", "*.pdf"), ("Word", "*.docx"),
+                       (self._t("ft_all"), "*.*")],
         )
         if not path:
             return
@@ -861,8 +872,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     def _on_pick_mvsvoice(self):
         path = filedialog.askopenfilename(
-            parent=self,
-            filetypes=[("Multi Voice Studio voice", "*.mvsvoice")],
+            parent=self, title=self._t("btn_pick_mvsvoice"),
+            filetypes=[(self._t("ft_voice"), "*.mvsvoice")],
         )
         if path:
             self._add_mvsvoice(path)
@@ -928,8 +939,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._set_status("save_audio_no_audio", error=True)
             return
         path = filedialog.asksaveasfilename(
-            parent=self, defaultextension=".wav",
-            filetypes=[("WAV / MP3", "*.wav *.mp3"), ("All files", "*.*")],
+            parent=self, title=self._t("btn_save_audio_file"), defaultextension=".wav",
+            filetypes=[("WAV / MP3", "*.wav *.mp3"), (self._t("ft_all"), "*.*")],
         )
         if not path:
             return
@@ -952,8 +963,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._set_status("save_voice_no_audio", error=True)
             return
         path = filedialog.asksaveasfilename(
-            parent=self, defaultextension=".mvsvoice",
-            filetypes=[("Multi Voice Studio voice", "*.mvsvoice"), ("All files", "*.*")],
+            parent=self, title=self._t("btn_save_voice_file"), defaultextension=".mvsvoice",
+            filetypes=[(self._t("ft_voice"), "*.mvsvoice"), (self._t("ft_all"), "*.*")],
         )
         if not path:
             return
@@ -1275,6 +1286,59 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _is_saved_tab_active(self) -> bool:
         """「保存した声」タブが選ばれているか。"""
         return self._active_voice_tab() == "saved"
+
+    # ---- 情報ダイアログ -----------------------------------------------------
+    def _open_issue(self):
+        """「問題を報告」：報告用の Google フォームを既定のブラウザで開く。"""
+        try:
+            webbrowser.open(REPORT_FORM_URL)
+        except Exception:
+            pass
+
+    def _show_info(self):
+        """右上の情報ボタン。アプリ名・バージョン・問題報告のダイアログを出す。"""
+        # すでに開いていれば、二重に開かず前面に出すだけ。
+        win = getattr(self, "_info_win", None)
+        if win is not None and win.winfo_exists():
+            win.lift(); win.focus()
+            return
+
+        win = ctk.CTkToplevel(self)
+        self._info_win = win
+        win.title(self._t("info_title"))
+        win.resizable(False, False)
+        win.transient(self)
+        # 親ウィンドウの中央あたりに出す
+        self.update_idletasks()
+        w, h = 440, 240
+        px, py = self.winfo_rootx(), self.winfo_rooty()
+        pw = self.winfo_width()
+        x = px + max(0, (pw - w) // 2)
+        y = py + 80
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        body = ctk.CTkFrame(win, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=20, pady=16)
+        # アプリ名（見出し）
+        ctk.CTkLabel(body, text=APP_NAME, anchor="w",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(anchor="w")
+        # 補足（任意）：生成物の注意書き
+        ctk.CTkLabel(body, text=self._t("info_note"), anchor="w", justify="left",
+                     wraplength=w - 56).pack(anchor="w", pady=(8, 0))
+        # バージョン
+        ctk.CTkLabel(body, text=f'{self._t("info_version")}: {APP_VERSION}',
+                     anchor="w", text_color=("gray40", "gray60")).pack(anchor="w", pady=(10, 0))
+        # ボタン行：左「問題を報告」／右「閉じる」
+        btn_row = ctk.CTkFrame(body, fg_color="transparent")
+        btn_row.pack(fill="x", side="bottom")
+        ctk.CTkButton(btn_row, text=self._t("btn_report_issue"),
+                      command=self._open_issue).pack(side="left")
+        ctk.CTkButton(btn_row, text=self._t("btn_close"),
+                      command=win.destroy).pack(side="right")
+
+        # モーダル化（CTkToplevel はアイコン反映が遅れるので少し待ってから grab）
+        win.after(150, win.lift)
+        win.after(200, win.grab_set)
 
     def _set_entry_enabled(self, entry, enabled: bool):
         """入力欄を有効/無効にする。無効時は背景もグレーにして見た目で分かるようにする。"""
