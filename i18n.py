@@ -69,7 +69,10 @@ translations = {
         "status_play_error": "再生でエラー: {msg}",
         # 声タブ（プリセット／保存した声）
         "tab_preset": "プリセット",
+        "tab_design": "声を作る",
         "tab_saved": "保存した声",
+        "label_design": "声の説明（どんな声か）",
+        "label_style": "喋り方（感情・スタイル）",
         "btn_pick_mvsvoice": "ファイルを選択",
         "dnd_hint": "ここに .mvsvoice をドラッグ＆ドロップ",
         "saved_file_label": "ファイル名：{name}",
@@ -154,7 +157,10 @@ translations = {
         "status_play_error": "Playback error: {msg}",
         # Voice tabs (preset / saved)
         "tab_preset": "Preset",
+        "tab_design": "Create voice",
         "tab_saved": "Saved voices",
+        "label_design": "Voice description (what kind of voice)",
+        "label_style": "Style (emotion)",
         "btn_pick_mvsvoice": "Choose file",
         "dnd_hint": "Drag & drop a .mvsvoice here",
         "saved_file_label": "File name: {name}",

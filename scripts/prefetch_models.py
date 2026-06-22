@@ -21,10 +21,11 @@ import sys
 
 # 役割 -> HuggingFace のモデル名
 MODELS = {
-    # Qwen3-TTS（プリセット＋保存した声クローン）
+    # Qwen3-TTS（プリセット＋保存した声クローン＋声を作る）
     "qwen": [
-        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",   # プリセットの声
+        "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",   # プリセットの声（＋喋り方instruct）
         "Qwen/Qwen3-TTS-12Hz-1.7B-Base",          # 保存した声（クローン）
+        "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",   # 声を作る（VoiceDesign）
     ],
     # Irodori-TTS（基本＋VoiceDesign）
     "irodori": [

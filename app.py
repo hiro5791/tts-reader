@@ -96,6 +96,8 @@ AUDIO_LANG_TO_I18N = {
 
 # ウィンドウのサイズ・位置を覚えておくファイル
 WINDOW_STATE_FILE = Path(__file__).resolve().parent / "window_state.json"
+# 設定ファイル（最小限：エンジンと声だけ）
+SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
 DEFAULT_SIZE = (700, 800)   # 初回（保存が無いとき）の大きさ
 MIN_SIZE = (600, 700)       # これより小さくはしない
 
@@ -186,15 +188,19 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.minsize(*MIN_SIZE)
         self._apply_saved_geometry()
 
-        # 言語まわり
-        # 初期言語＝「前回保存した言語」→ 無ければ「OSの言語」→ それも対象外なら英語
-        self._lang = self._load_saved_lang() or i18n.detect_os_lang()
+        # 設定（最小限：エンジンと声だけ）を読み込む。
+        self._settings = self._load_settings()
+
+        # 表示言語：保存値が有効ならそれ、無ければ OS の言語（対象外なら英語）。
+        saved_lang = self._settings.get("lang")
+        self._lang = saved_lang if saved_lang in i18n.LANGUAGES else i18n.detect_os_lang()
         self._lang_label_to_code = {label: code for code, label in i18n.LANGUAGES.items()}
         # プルダウンの並び順（日本語・英語を特別扱いせず、表示名で五十音／アルファベット順）
         self._lang_labels_sorted = sorted(i18n.LANGUAGES.values())
 
-        # エンジンまわり：初期エンジン＝「前回保存したエンジン」→ 無ければ既定（Irodori）
-        self._engine = self._load_saved_engine() or DEFAULT_ENGINE
+        # エンジン：保存値が有効ならそれ、無ければ既定。
+        saved_engine = self._settings.get("engine")
+        self._engine = saved_engine if saved_engine in ENGINES else DEFAULT_ENGINE
 
         # 状態まわりの変数
         self._state = STATE_IDLE
@@ -228,9 +234,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._status_error = False
 
         self._build_widgets()
-        self._refresh_voices(self._engine)
-        # 音声言語は前回保存した値を優先（そのエンジンで使えなければ既定にする）
-        self._refresh_audio_languages(self._engine, preferred=self._load_saved_audio_lang())
+        # 声：保存値がそのエンジンに存在すればそれ、無ければ既定にフォールバック。
+        self._refresh_voices(self._engine, preferred=self._settings.get("voice"))
+        # 音声言語：保存値がそのエンジンで使えればそれ、無ければ既定にフォールバック。
+        # （速度・音量・ピッチは保存しない＝毎回 1.0倍/100%/0半音から開始）
+        self._refresh_audio_languages(self._engine, preferred=self._settings.get("audio_lang"))
         self._set_state(STATE_IDLE)
         self._apply_language(self._lang)   # 画面の文字を初期言語でセット
 
@@ -252,12 +260,32 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             pass
         return None
 
+    def _virtual_screen_bounds(self):
+        """全モニタを合わせたデスクトップ全体の (左, 上, 幅, 高さ) を返す。
+
+        マルチディスプレイ対応：Windows では「仮想スクリーン」を使う
+        （2台目モニタの座標はプライマリ幅を超えたり負になったりするため）。
+        取得できなければプライマリモニタのみにフォールバックする。
+        """
+        try:
+            import ctypes
+            gsm = ctypes.windll.user32.GetSystemMetrics
+            vx, vy = gsm(76), gsm(77)        # SM_XVIRTUALSCREEN / SM_YVIRTUALSCREEN
+            vw, vh = gsm(78), gsm(79)        # SM_CXVIRTUALSCREEN / SM_CYVIRTUALSCREEN
+            if vw > 0 and vh > 0:
+                return vx, vy, vw, vh
+        except Exception:
+            pass
+        return 0, 0, self.winfo_screenwidth(), self.winfo_screenheight()
+
     def _clamp_to_screen(self, w, h, x, y):
-        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-        w = max(MIN_SIZE[0], min(w, sw))
-        h = max(MIN_SIZE[1], min(h, sh))
-        x = max(0, min(x, sw - w))
-        y = max(0, min(y, sh - h))
+        # マルチディスプレイ全体（仮想デスクトップ）の範囲に収める。
+        # 2台目モニタ上の位置（大きい座標・負座標）もそのまま保持できる。
+        vx, vy, vw, vh = self._virtual_screen_bounds()
+        w = max(MIN_SIZE[0], min(w, vw))
+        h = max(MIN_SIZE[1], min(h, vh))
+        x = max(vx, min(x, vx + vw - w))
+        y = max(vy, min(y, vy + vh - h))
         return w, h, x, y
 
     def _apply_saved_geometry(self):
@@ -276,51 +304,30 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
-    def _load_saved_lang(self) -> str | None:
-        """前回保存した言語コードを返す。無効／未保存なら None。"""
-        try:
-            data = json.loads(WINDOW_STATE_FILE.read_text(encoding="utf-8"))
-            lang = data.get("lang")
-            if lang in i18n.LANGUAGES:
-                return lang
-        except Exception:
-            pass
-        return None
-
-    def _load_saved_engine(self) -> str | None:
-        """前回保存したエンジンのキーを返す。無効／未保存なら None。"""
-        try:
-            data = json.loads(WINDOW_STATE_FILE.read_text(encoding="utf-8"))
-            engine = data.get("engine")
-            if engine in ENGINES:
-                return engine
-        except Exception:
-            pass
-        return None
-
-    def _load_saved_audio_lang(self) -> str | None:
-        """前回保存した音声言語（言語名）を返す。未保存なら None。
-
-        値の妥当性は、エンジンごとの選択肢に対して後で確認する。
-        """
-        try:
-            data = json.loads(WINDOW_STATE_FILE.read_text(encoding="utf-8"))
-            val = data.get("audio_lang")
-            if isinstance(val, str):
-                return val
-        except Exception:
-            pass
-        return None
-
     def _save_window_state(self):
+        """ウィンドウの大きさ・位置だけを保存する（次回起動時に復元）。"""
         try:
             WINDOW_STATE_FILE.write_text(
-                json.dumps({
-                    "geometry": self.geometry(),
-                    "lang": self._lang,
-                    "engine": self._engine,
-                    "audio_lang": self._current_audio_lang,
-                }),
+                json.dumps({"geometry": self.geometry()}), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
+    def _load_settings(self) -> dict:
+        """設定ファイル（settings.json）を読む。無い／壊れていれば空の辞書。"""
+        try:
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_settings(self):
+        """設定（エンジン・声・表示言語・音声言語）を保存する。"""
+        try:
+            SETTINGS_FILE.write_text(
+                json.dumps({"engine": self._engine, "voice": self._current_voice_id,
+                            "lang": self._lang, "audio_lang": self._current_audio_lang},
+                           ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
         except Exception:
@@ -375,26 +382,42 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._inner_text.bind("<Control-a>", self._select_all_text)
         self._inner_text.bind("<Control-A>", self._select_all_text)
 
-        # 声：タブ方式（「プリセット」「保存した声」）。タブで自然に排他になる。
-        # 将来タブを増やすときは self._voice_tab_keys に i18n キーを足すだけでよい。
-        # anchor="nw" でタブ見出しを左寄せ（他の要素の左端にそろえる）。
-        self._voice_tab_keys = ["tab_preset", "tab_saved"]   # ← ここに足せばタブが増える
-        self.voice_tabview = ctk.CTkTabview(self, height=150, anchor="nw",
+        # 声：タブ方式。順番は「プリセット ／ 声を作る ／ 保存した声」。
+        # エンジンにより使えない組み合わせは _apply_engine_gating でグレーアウトする。
+        self._voice_tab_keys = ["tab_preset", "tab_design", "tab_saved"]
+        self.voice_tabview = ctk.CTkTabview(self, height=200, anchor="nw",
                                             command=self._on_voice_tab_change)
         self.voice_tabview.pack(fill="x", padx=16, pady=(8, 0))
         self._voice_tab_names = {}
         for _k in self._voice_tab_keys:
-            _name = self._t(_k)
+            _name = self._tab_label(_k)
             self.voice_tabview.add(_name)
             self._voice_tab_names[_k] = _name
-        # プリセットタブ：今ある「声」のプルダウン（おの あんな 等）
+
+        # --- プリセットタブ（Qwen専用。Irodoriではグレーアウト）---
         preset_tab = self.voice_tabview.tab(self._voice_tab_names["tab_preset"])
         self.voice_menu = ctk.CTkOptionMenu(preset_tab, values=["—"],
                                             command=self._on_voice_change)
-        self.voice_menu.pack(anchor="w", padx=4, pady=4)
-        # 保存した声タブ：ファイル選択／ドラッグ&ドロップ（.mvsvoice を1個まで）
+        self.voice_menu.pack(anchor="w", padx=4, pady=(4, 0))
+        # 喋り方（感情・スタイル）欄。Qwenのみ有効、Irodoriはグレーアウト。
+        self.lbl_style_preset = ctk.CTkLabel(preset_tab, text="")
+        self.lbl_style_preset.pack(anchor="w", padx=4, pady=(8, 0))
+        self.style_preset_entry = ctk.CTkEntry(preset_tab)
+        self.style_preset_entry.pack(fill="x", padx=4, pady=(2, 4))
+        # 通常時の背景色を控えておく（無効時はグレー背景にして見た目でも分かるようにする）。
+        # 空の CTkEntry は disabled だけだと見た目が変わらないため、背景色でも明示する。
+        self._entry_fg_normal = self.style_preset_entry.cget("fg_color")
+        self._entry_fg_disabled = ("gray82", "gray28")
+
+        # --- 声を作る（VoiceDesign）タブ（Qwen/Irodori 両対応）---
+        design_tab = self.voice_tabview.tab(self._voice_tab_names["tab_design"])
+        self.lbl_design = ctk.CTkLabel(design_tab, text="")
+        self.lbl_design.pack(anchor="w", padx=4, pady=(4, 0))
+        self.design_box = ctk.CTkTextbox(design_tab, height=64, wrap="word")
+        self.design_box.pack(fill="x", padx=4, pady=(2, 4))
+
+        # --- 保存した声タブ（Qwen/Irodori 両対応）---
         saved_tab = self.voice_tabview.tab(self._voice_tab_names["tab_saved"])
-        # 上段：「ファイルを選択」ボタン＋その右にファイル名（フルパス）
         pick_row = ctk.CTkFrame(saved_tab, fg_color="transparent")
         pick_row.pack(fill="x", padx=4, pady=(4, 0))
         self.btn_pick_mvsvoice = ctk.CTkButton(pick_row, text="", width=120,
@@ -402,7 +425,6 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_pick_mvsvoice.pack(side="left")
         self.lbl_saved_file = ctk.CTkLabel(pick_row, text="", anchor="w")
         self.lbl_saved_file.pack(side="left", padx=(8, 0), fill="x", expand=True)
-        # 下段：ドロップ領域（素の tk.Label。tkinterdnd2 でドロップを受ける）
         self.dnd_zone = tk.Label(saved_tab, text="", relief="groove", bd=1,
                                  height=2, fg="#666666", bg="#f5f5f5")
         self.dnd_zone.pack(fill="x", padx=4, pady=(6, 0))
@@ -411,6 +433,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.dnd_zone.dnd_bind("<<Drop>>", self._on_drop_mvsvoice)
         except Exception:
             pass   # DnD が使えない環境では「ファイルを選択」だけ使える
+        # 喋り方欄（保存した声）。Qwenのみ有効、Irodoriはグレーアウト。
+        self.lbl_style_saved = ctk.CTkLabel(saved_tab, text="")
+        self.lbl_style_saved.pack(anchor="w", padx=4, pady=(8, 0))
+        self.style_saved_entry = ctk.CTkEntry(saved_tab)
+        self.style_saved_entry.pack(fill="x", padx=4, pady=(2, 4))
 
         # 速度・音量・ピッチ。広いと横1行、狭いと縦3段に自動で組み替える。
         controls_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -451,9 +478,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._fig.subplots_adjust(left=0.04, right=0.96, top=0.92, bottom=0.22)
         self._canvas = FigureCanvasTkAgg(self._fig, master=wave_frame)
         self._canvas.get_tk_widget().pack(fill="both", expand=True)
-        # 生成中インジケータ（処理中アニメーション）。波形エリアの中央に重ねて表示。
-        # 普段は隠し、生成中だけ _set_state で表示してアニメーションさせる。
+        # 進捗バー。生成中は常に出す。
+        #   分割しないとき … 左右に動く「不確定バー」（処理中表示）
+        #   2チャンク以上に分割されたとき … 「完了数/全数」の確定バー
         self._busy_bar = ctk.CTkProgressBar(wave_frame, mode="indeterminate")
+        self._busy_bar.set(0)
 
         # 「声を保存する」ボタン：波形の枠の外（下の白い部分）に置く
         save_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -514,9 +543,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
     # ---- 言語の切り替え -----------------------------------------------------
     def _on_language_change(self, lang_label: str):
+        # 表示言語は保存しない（毎回 OS の言語から始める）。切替は今の表示にだけ反映。
         code = self._lang_label_to_code.get(lang_label, i18n.DEFAULT_LANG)
         self._apply_language(code)
-        self._save_window_state()   # 言語を変えたらすぐ保存する
 
     def _apply_language(self, lang: str):
         """画面に出ている文字を、指定言語に一括で貼り替える。"""
@@ -533,9 +562,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_open_file.configure(text=self._t("btn_open_file"))
         self.chk_append.configure(text=self._t("chk_append"))
 
-        # 声タブの見出し（タブ名）と「保存した声」のプレースホルダーを言語に合わせる
+        # 声タブの見出し（タブ名）を言語に合わせて貼り替える
         for _k in self._voice_tab_keys:
-            _new = self._t(_k)
+            _new = self._tab_label(_k)
             _old = self._voice_tab_names[_k]
             if _new != _old:
                 self.voice_tabview.rename(_old, _new)
@@ -544,6 +573,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_pick_mvsvoice.configure(text=self._t("btn_pick_mvsvoice"))
         self.dnd_zone.configure(text=self._t("dnd_hint"))
         self._refresh_saved_file_label()
+        # 「声を作る」「喋り方」欄のラベル
+        self.lbl_design.configure(text=self._t("label_design"))
+        self.lbl_style_preset.configure(text=self._t("label_style"))
+        self.lbl_style_saved.configure(text=self._t("label_style"))
 
         # 声・音声言語プルダウンの中身（各項目＋選択中の表示）も新しい言語で作り直す
         self._relabel_voices()
@@ -660,7 +693,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._refresh_voices(key)
         self._refresh_audio_languages(key)   # 言語の選択肢・状態も連動して切り替える
         self._maybe_update_placeholder()     # 案内文を音声言語に合わせる
-        self._save_window_state()   # 選んだエンジン・音声言語をすぐ保存する
+        self._set_state(self._state)         # エンジンに応じたグレーアウトを反映
+        # 保存はアプリ終了時にまとめて行う（ここでは保存しない）
 
     def _refresh_voices(self, engine_key: str, preferred: str | None = None):
         # 声の一覧は (表示名キー, 声ID)。表示名は今の言語で組み立てる。
@@ -735,10 +769,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self.audio_lang_menu.configure(state="disabled")
 
     def _on_audio_lang_change(self, label: str):
-        # 選んだ音声言語を、表示名ではなく言語名（値）で覚えておく
+        # 選んだ音声言語を、表示名ではなく言語名（値）で覚えておく（音声言語は保存しない）
         self._current_audio_lang = self._audio_lang_map.get(label, self._current_audio_lang)
         self._maybe_update_placeholder()   # 案内文を音声言語に合わせる
-        self._save_window_state()          # 音声言語の選択を保存する
 
     def _on_speed_change(self, value):
         self.speed_value_label.configure(
@@ -972,8 +1005,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._cancel_event = threading.Event()
         cancel_event = self._cancel_event
 
-        # どちらのタブが有効かで、生成の中身（プリセット or 保存した声のクローン）を決める
-        if self._is_saved_tab_active():
+        language = self._current_audio_lang
+        active = self._active_voice_tab()   # "preset" | "design" | "saved"
+
+        if active == "saved":
+            # 保存した声（クローン）
             if not self._saved_voice_file:
                 self._set_status("saved_file_need", error=True)
                 return
@@ -983,17 +1019,29 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 self._set_status("status_error", error=True, msg=str(e))
                 return
             language = mv_lang or self._current_audio_lang
+            style = self.style_saved_entry.get().strip() or None
             job = (lambda: synthesize_clone(engine, text, ref_wav,
                                             ref_text=ref_text, language=language,
                                             speed=speed, volume=volume, pitch=pitch,
-                                            progress_callback=progress,
+                                            style=style, progress_callback=progress,
                                             cancel_event=cancel_event))
             voice_label = Path(self._saved_voice_file).stem
-        else:
-            voice = self._current_voice_id
-            language = self._current_audio_lang
-            job = (lambda: synthesize(text, engine, voice=voice, speed=speed,
+        elif active == "design":
+            # 声を作る（VoiceDesign）：説明文から声を作る
+            description = self.design_box.get("1.0", "end").strip()
+            job = (lambda: synthesize(text, engine, mode="voice_design",
+                                      voice_description=description, speed=speed,
                                       volume=volume, pitch=pitch, language=language,
+                                      progress_callback=progress,
+                                      cancel_event=cancel_event))
+            voice_label = self._t("tab_design")
+        else:
+            # プリセット声（Qwen のみ喋り方=instruct を渡す。Irodori は無視される）
+            voice = self._current_voice_id
+            style = self.style_preset_entry.get().strip() or None
+            job = (lambda: synthesize(text, engine, voice=voice, mode="preset",
+                                      style=style, speed=speed, volume=volume,
+                                      pitch=pitch, language=language,
                                       progress_callback=progress,
                                       cancel_event=cancel_event))
             voice_label = self.voice_menu.get()
@@ -1018,9 +1066,17 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         ).start()
 
     def _on_chunk_progress(self, i, n):
-        # 機能③：Irodori 分割生成の進捗を表示（1チャンクだけなら通常の「生成中…」のまま）
-        if self._state == STATE_GENERATING and n > 1:
-            self._set_status("status_generating_progress", i=i, n=n)
+        # メインスレッドで呼ばれる（_on_speak で after 経由）。
+        # 2チャンク以上に分割されたときだけ、不確定バー → 「i/n」の確定バーに切り替える。
+        # 1チャンク（分割なし／Qwen）のときは何もせず、左右に動く不確定バーのままにする。
+        if self._state != STATE_GENERATING or n < 2:
+            return
+        self._busy_bar.stop()                        # 左右の往復アニメを止め
+        self._busy_bar.configure(mode="determinate")  # 確定バーに切り替え
+        if not self._busy_bar.winfo_ismapped():
+            self._busy_bar.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.6)
+        self._busy_bar.set(i / n)   # 完了したチャンク数 / 全チャンク数
+        self._set_status("status_generating_progress", i=i, n=n)
 
     def _worker(self, job, engine_label, voice_label, speed, gen_id):
         try:
@@ -1201,12 +1257,33 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._cursor_after_id = None
 
     # ---- 状態とステータス ---------------------------------------------------
+    def _tab_label(self, key: str) -> str:
+        """タブ見出しの文字。左右に空白を足して、タブ同士の文字がくっつかないようにする。"""
+        return "   " + self._t(key) + "   "
+
+    def _active_voice_tab(self) -> str:
+        """選択中の声タブを返す（"preset" / "design" / "saved"）。"""
+        try:
+            cur = self.voice_tabview.get()
+        except Exception:
+            return "preset"
+        for key in ("tab_preset", "tab_design", "tab_saved"):
+            if self._voice_tab_names.get(key) == cur:
+                return key[len("tab_"):]
+        return "preset"
+
     def _is_saved_tab_active(self) -> bool:
         """「保存した声」タブが選ばれているか。"""
-        try:
-            return self.voice_tabview.get() == self._voice_tab_names["tab_saved"]
-        except Exception:
-            return False
+        return self._active_voice_tab() == "saved"
+
+    def _set_entry_enabled(self, entry, enabled: bool):
+        """入力欄を有効/無効にする。無効時は背景もグレーにして見た目で分かるようにする。"""
+        if enabled:
+            entry.configure(state="normal", fg_color=self._entry_fg_normal)
+        else:
+            # disabled の前に背景色を変える（disabled 中は一部設定が反映されないため）
+            entry.configure(fg_color=self._entry_fg_disabled)
+            entry.configure(state="disabled")
 
     def _set_state(self, state: str):
         self._state = state
@@ -1226,9 +1303,21 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.play_btn.configure(state="normal" if play_on else "disabled")
         self.stop_btn.configure(state="normal" if stop_on else "disabled")
         self.engine_btn.configure(state="normal" if controls_on else "disabled")
-        self.voice_menu.configure(state="normal" if controls_on else "disabled")
-        # 生成中・再生中はタブ（プリセット／保存した声）の切り替えも無効化
+        # 生成中・再生中はタブ（プリセット／声を作る／保存した声）の切り替えも無効化
         self.voice_tabview.configure(state="normal" if controls_on else "disabled")
+        # エンジンによる出し分け。
+        #  ・声のプルダウン：両エンジンで使える（Irodori も「デフォルト」や説明文ベースの
+        #    声を選べるようにする）。待機中のみ操作可。
+        #  ・「喋り方（感情・スタイル）」欄：Qwen 専用。Irodori は感情を独立指定できない
+        #    （caption 同居／本文の絵文字）ため、グレーアウトする。
+        is_irodori = (self._engine == "irodori")
+        self.voice_menu.configure(state="normal" if controls_on else "disabled")
+        style_on = controls_on and not is_irodori
+        # 「喋り方」欄（プリセット／保存した声）は状態＋背景色の両方でグレーアウトする
+        self._set_entry_enabled(self.style_preset_entry, style_on)
+        self._set_entry_enabled(self.style_saved_entry, style_on)
+        # 「声を作る」の説明欄は両エンジン対応（待機中だけ編集可）
+        self.design_box.configure(state="normal" if controls_on else "disabled")
         # 機能①：生成中はテキストを編集できないようにする（音声と文章のズレ防止）。
         # 別スレッドからではなく、必ずこのメインスレッドの状態更新で切り替える。
         self.text_box.configure(state="disabled" if state == STATE_GENERATING else "normal")
@@ -1238,8 +1327,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_save_audio_file.configure(state="normal" if save_on else "disabled")
         self.btn_save_voice_file.configure(state="normal" if save_on else "disabled")
 
-        # 生成中は波形エリアに「処理中」のアニメーションを重ねて表示する
+        # 生成中はバーを表示。既定は左右に動く不確定バー（分割しないときの処理中表示）。
+        # 2チャンク以上に分割されたら _on_chunk_progress で i/n の確定バーに切り替える。
         if state == STATE_GENERATING:
+            self._busy_bar.configure(mode="indeterminate")
             self._busy_bar.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.6)
             self._busy_bar.start()
         else:
@@ -1259,6 +1350,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
 
     def _on_close(self):
+        # アプリ終了時に、最小限の設定（エンジン・声）とウィンドウ位置を保存する
+        self._save_settings()
         self._save_window_state()
         self._cancel_cursor()
         try:

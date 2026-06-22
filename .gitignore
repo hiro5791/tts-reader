@@ -56,6 +56,7 @@ speakers/
 
 # ===== アプリのローカル状態・ユーザーデータ =====
 window_state.json
+settings.json
 
 # ===== 設定・秘密情報 =====
 .env

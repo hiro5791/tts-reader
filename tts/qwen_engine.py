@@ -110,11 +110,12 @@ def _get_model():
 
 def synthesize(text: str, voice: str = DEFAULT_VOICE,
                language: str = DEFAULT_LANGUAGE, progress_callback=None,
-               cancel_event=None) -> str:
+               cancel_event=None, style: str | None = None) -> str:
     """テキストを Qwen3-TTS で読み上げ、生の wav ファイルのパスを返す。
 
     voice    … プリセット話者ID（VOICES の右側の値）
     language … 何語として読み上げるか（LANGUAGES の右側の値。例 "Japanese"）。
+    style    … 喋り方（感情・スタイル）。Qwen では instruct として声と分離して指定できる。
     progress_callback … 受け取るが Qwen は分割しないので未使用（アダプタ方式の互換用）。
 
     速度・音量・ピッチは共通層（adapter）の後処理で適用するため、ここでは生の音声を返す。
@@ -131,6 +132,7 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE,
         text=text,
         language=language,
         speaker=speaker,
+        instruct=(style or None),   # 喋り方（感情）を声と分けて指定（1.7Bのみ有効）
     )
     audio = wavs[0]
 
@@ -138,5 +140,5 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE,
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_path = OUTPUT_DIR / f"qwen3_{stamp}.wav"
     sf.write(str(out_path), audio, sr)
-    print(f"[Qwen3] 音声を書き出しました（話者={speaker}, 言語={language}）: {out_path}")
+    print(f"[Qwen3] 音声を書き出しました（話者={speaker}, 言語={language}, 喋り方={style!r}）: {out_path}")
     return str(out_path)

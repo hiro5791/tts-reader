@@ -309,3 +309,21 @@ def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
     voice_args = ["--ref-wav", str(ref_wav)]
     return _generate_chunked(HF_CHECKPOINT, text, voice_args, tag="クローン(ref)",
                              progress_callback=progress_callback, cancel_event=cancel_event)
+
+
+def synthesize_design(text: str, caption: str = "",
+                      language: str = DEFAULT_LANGUAGE, progress_callback=None,
+                      cancel_event=None) -> str:
+    """声を作る（VoiceDesign）：caption（声の説明文）から声を作って読み上げる。
+
+    Irodori の VoiceDesign は別モデル（HF_CHECKPOINT_VOICEDESIGN）。日本語のみ。
+    感情・話し方は caption に同居させる（独立した感情指定は無い）。
+    速度・音量・ピッチは共通層で後処理する。
+    """
+    caption = (caption or "").strip()
+    if caption:
+        voice_args = ["--caption", caption, "--no-ref"]
+    else:
+        voice_args = ["--no-ref"]   # 説明が空なら参照なし（声はランダム寄り）
+    return _generate_chunked(HF_CHECKPOINT_VOICEDESIGN, text, voice_args, tag="声を作る",
+                             progress_callback=progress_callback, cancel_event=cancel_event)
