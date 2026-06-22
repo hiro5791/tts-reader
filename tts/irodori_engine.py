@@ -12,11 +12,17 @@ GitHub のリポジトリにある infer.py をコマンドとして実行して
 from __future__ import annotations
 
 import datetime as _dt
+import re
 import shutil
 import site
 import subprocess
 import sys
 from pathlib import Path
+
+# 長文分割の設定（実機で崩れ始める所を見て微調整してよい）
+_CHUNK_MIN_CHARS = 100      # 累計がこれ以上になったら文末で1チャンク確定
+_LONG_SENTENCE_CHARS = 140  # 1文だけでこれを超えたら「、」で更に割る保険
+_CHUNK_GAP_SEC = 0.25       # チャンク間に挟む無音の長さ
 
 
 def _find_uv() -> str:
@@ -105,15 +111,24 @@ def list_languages() -> list[tuple[str, str]]:
     return list(LANGUAGES)
 
 
+class GenerationCancelled(Exception):
+    """生成がユーザーにより停止されたことを表す（アプリ側で結果は無視される）。"""
+
+
 def _run_infer(checkpoint: str, text: str, voice_args: list[str], speed: float,
-               tag: str = "") -> str:
-    """infer.py を実行して wav を書き出し、そのパスを返す（共通処理）。"""
+               tag: str = "", cancel_event=None) -> str:
+    """infer.py を実行して wav を書き出し、そのパスを返す（共通処理）。
+
+    cancel_event が途中で set されたら、サブプロセスを kill して GenerationCancelled。
+    """
     if not IRODORI_DIR.exists():
         raise FileNotFoundError(
             "Irodori-TTS がまだ用意されていません。\n"
             f"（{IRODORI_DIR} が見つかりません）\n"
             "先に scripts/setup_irodori を実行して、Irodori を準備してください。"
         )
+    if cancel_event is not None and cancel_event.is_set():
+        raise GenerationCancelled()
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -136,36 +151,132 @@ def _run_infer(checkpoint: str, text: str, voice_args: list[str], speed: float,
     print(f"[Irodori] 実行（{tag}, モデル={checkpoint}, 速度={speed}, "
           f"duration-scale={duration_scale}） ...（初回はモデル読み込みで時間がかかります）")
 
-    result = subprocess.run(
-        cmd, cwd=str(IRODORI_DIR), capture_output=True,
+    # Popen で起動し、停止フラグを見ながら待つ（停止されたら kill する）
+    proc = subprocess.Popen(
+        cmd, cwd=str(IRODORI_DIR),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True, encoding="utf-8", errors="replace",
     )
+    while True:
+        try:
+            stdout, stderr = proc.communicate(timeout=0.3)
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_event is not None and cancel_event.is_set():
+                proc.kill()
+                try:
+                    proc.communicate(timeout=5)
+                except Exception:
+                    pass
+                raise GenerationCancelled()
 
-    if result.returncode != 0 or not out_path.exists():
+    if proc.returncode != 0 or not out_path.exists():
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled()
         raise RuntimeError(
             "Irodori-TTS の実行に失敗しました。\n"
-            f"--- 標準出力 ---\n{result.stdout[-2000:]}\n"
-            f"--- エラー出力 ---\n{result.stderr[-2000:]}"
+            f"--- 標準出力 ---\n{(stdout or '')[-2000:]}\n"
+            f"--- エラー出力 ---\n{(stderr or '')[-2000:]}"
         )
     print(f"[Irodori] 音声を書き出しました（{tag}, 速度={speed}）: {out_path}")
     return str(out_path)
 
 
-def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
-               language: str = DEFAULT_LANGUAGE) -> str:
-    """日本語テキストを Irodori-TTS で読み上げ、wav ファイルのパスを返す。
+# ---- 長文分割（Irodori 専用。約30秒の生成上限を超えると崩れるため必須）-----
+def _split_sentences(text: str) -> list[str]:
+    """「。」「！」「？」（と改行）で文に区切る。区切り文字は文末に残す。"""
+    parts = re.split(r"(?<=[。！？\n])", text)
+    return [p for p in (s.strip() for s in parts) if p]
 
-    voice    … 声ID（VOICES のキー）。"default" は参照なし。
-    speed    … 1.0 が等倍。Irodori 側の --duration-scale で速度を変える（ピッチ保持）。
-    language … 互換のため受け取るが、Irodori は日本語のみ対応のため使わない。
+
+def _split_by_comma(s: str) -> list[str]:
+    """長すぎる1文を「、」（と「,」）で更に分割する保険。"""
+    parts = re.split(r"(?<=[、,])", s)
+    return [p for p in (x.strip() for x in parts) if p] or [s]
+
+
+def split_text(text: str) -> list[str]:
+    """長文を、文末を尊重しつつ約100文字ごとのチャンクに分ける。
+
+    1. 「。！？」で文に区切る。
+    2. 文を順に足し、累計が 100 文字以上になったら、その文末でチャンク確定。
+    3. 保険：1文だけで 140 文字超なら「、」で更に分割してから足す。
+    """
+    chunks: list[str] = []
+    cur = ""
+    for s in _split_sentences(text):
+        pieces = _split_by_comma(s) if len(s) > _LONG_SENTENCE_CHARS else [s]
+        for piece in pieces:
+            cur += piece
+            if len(cur) >= _CHUNK_MIN_CHARS:
+                chunks.append(cur)
+                cur = ""
+    if cur:
+        chunks.append(cur)
+    return chunks or [text.strip()]
+
+
+def _generate_chunked(checkpoint: str, text: str, voice_args: list[str], tag: str,
+                      progress_callback=None, cancel_event=None) -> str:
+    """テキストをチャンクに分けて順に生成し、無音を挟んで1本に連結する。
+
+    速度・音量・ピッチは共通層で後処理するため、ここは各チャンクを等倍（生）で作る。
+    progress_callback(i, n) を各チャンク完了時に呼ぶ（UI の「生成中…（i/n）」用）。
+    cancel_event が set されたら、その時点で停止する（次チャンクへ進まない）。
+    """
+    import soundfile as sf
+    from .audio_utils import concat_with_silence
+
+    chunks = split_text(text)
+    n = len(chunks)
+
+    # 1チャンクならそのまま（連結の手間を省く）
+    if n == 1:
+        path = _run_infer(checkpoint, chunks[0], voice_args, 1.0, tag=f"{tag} 1/1",
+                          cancel_event=cancel_event)
+        if progress_callback:
+            try:
+                progress_callback(1, 1)
+            except Exception:
+                pass
+        return path
+
+    audios, sr = [], None
+    for i, ch in enumerate(chunks):
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled()
+        path = _run_infer(checkpoint, ch, voice_args, 1.0, tag=f"{tag} {i + 1}/{n}",
+                          cancel_event=cancel_event)
+        data, sr = sf.read(path, dtype="float32")
+        audios.append(data)
+        if progress_callback:
+            try:
+                progress_callback(i + 1, n)
+            except Exception:
+                pass
+
+    merged = concat_with_silence(audios, sr, gap_sec=_CHUNK_GAP_SEC)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out_path = OUTPUT_DIR / f"irodori_merged_{stamp}.wav"
+    sf.write(str(out_path), merged, sr)
+    print(f"[Irodori] {n} チャンクを連結しました: {out_path}")
+    return str(out_path)
+
+
+def synthesize(text: str, voice: str = DEFAULT_VOICE,
+               language: str = DEFAULT_LANGUAGE, progress_callback=None,
+               cancel_event=None) -> str:
+    """日本語テキストを Irodori-TTS で読み上げ、生の wav ファイルのパスを返す。
+
+    長文は約100文字ごとに分割して順に生成し、連結する（30秒上限対策）。
+    速度・音量・ピッチは共通層（adapter）の後処理で適用する。
     """
     if voice not in VOICES:
         voice = DEFAULT_VOICE
     cfg = VOICES[voice]
 
-    # 声の種類に応じて、使うモデルと引数を切り替える。
-    #   caption あり … VoiceDesign モデルで「説明文どおりの声」を作る（--caption ... --no-ref）
-    #   caption なし … 基本Irodori。ref があれば参照音声、無ければ参照なし（--no-ref）
+    # 声の種類に応じて、使うモデルと引数を切り替える（チャンク間で共通）。
     caption = cfg.get("caption")
     if caption:
         checkpoint = HF_CHECKPOINT_VOICEDESIGN
@@ -181,17 +292,20 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
                 raise FileNotFoundError(f"参照音声が見つかりません: {ref_path}")
             voice_args = ["--ref-wav", str(ref_path)]
 
-    return _run_infer(checkpoint, text, voice_args, speed, tag=f"声={voice}")
+    return _generate_chunked(checkpoint, text, voice_args, tag=f"声={voice}",
+                             progress_callback=progress_callback, cancel_event=cancel_event)
 
 
 def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
-                     language: str = DEFAULT_LANGUAGE, speed: float = 1.0) -> str:
-    """参照音声（ref_wav）のクローンで読み上げる。Irodori は日本語のみ。
+                     language: str = DEFAULT_LANGUAGE, progress_callback=None,
+                     cancel_event=None) -> str:
+    """参照音声（ref_wav）のクローンで読み上げる（長文分割あり）。Irodori は日本語のみ。
 
-    infer.py に --ref-wav を渡して、基本Irodoriモデルでクローン生成する。
-    ref_text / language は受け取るが、Irodori 側では使わない。
+    infer.py に --ref-wav を渡して基本Irodoriモデルでクローン生成する。
+    速度・音量・ピッチは共通層で後処理する。
     """
     if not Path(ref_wav).exists():
         raise FileNotFoundError(f"参照音声が見つかりません: {ref_wav}")
     voice_args = ["--ref-wav", str(ref_wav)]
-    return _run_infer(HF_CHECKPOINT, text, voice_args, speed, tag="クローン(ref)")
+    return _generate_chunked(HF_CHECKPOINT, text, voice_args, tag="クローン(ref)",
+                             progress_callback=progress_callback, cancel_event=cancel_event)

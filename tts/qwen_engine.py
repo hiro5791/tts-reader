@@ -14,7 +14,6 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from .audio_utils import change_speed_keep_pitch
 
 # ---- 最小版からの固定設定 ----------------------------------------------------
 
@@ -109,13 +108,17 @@ def _get_model():
     return _model
 
 
-def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
-               language: str = DEFAULT_LANGUAGE) -> str:
-    """テキストを Qwen3-TTS で読み上げ、wav ファイルのパスを返す。
+def synthesize(text: str, voice: str = DEFAULT_VOICE,
+               language: str = DEFAULT_LANGUAGE, progress_callback=None,
+               cancel_event=None) -> str:
+    """テキストを Qwen3-TTS で読み上げ、生の wav ファイルのパスを返す。
 
     voice    … プリセット話者ID（VOICES の右側の値）
-    speed    … 1.0 が等倍。生成後にタイムストレッチで速度を変える（ピッチは保持）。
     language … 何語として読み上げるか（LANGUAGES の右側の値。例 "Japanese"）。
+    progress_callback … 受け取るが Qwen は分割しないので未使用（アダプタ方式の互換用）。
+
+    速度・音量・ピッチは共通層（adapter）の後処理で適用するため、ここでは生の音声を返す。
+    Qwen3 は長文でも分割せず一度に生成する（10分超でも崩れない設計のため）。
     """
     import soundfile as sf
 
@@ -131,12 +134,9 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE, speed: float = 1.0,
     )
     audio = wavs[0]
 
-    # 速度調整（等倍以外のときだけ後処理）
-    audio = change_speed_keep_pitch(audio, speed)
-
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_path = OUTPUT_DIR / f"qwen3_{stamp}.wav"
     sf.write(str(out_path), audio, sr)
-    print(f"[Qwen3] 音声を書き出しました（話者={speaker}, 言語={language}, 速度={speed}）: {out_path}")
+    print(f"[Qwen3] 音声を書き出しました（話者={speaker}, 言語={language}）: {out_path}")
     return str(out_path)

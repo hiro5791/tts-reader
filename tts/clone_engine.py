@@ -10,8 +10,6 @@ from __future__ import annotations
 import datetime as _dt
 from pathlib import Path
 
-from .audio_utils import change_speed_keep_pitch
-
 # Base（クローン対応）モデル
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_LANGUAGE = "Japanese"
@@ -39,8 +37,13 @@ def _get_model():
 
 
 def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
-                     language: str = DEFAULT_LANGUAGE, speed: float = 1.0) -> str:
-    """参照音声のクローンで text を読み上げ、wav ファイルのパスを返す。"""
+                     language: str = DEFAULT_LANGUAGE, progress_callback=None,
+                     cancel_event=None) -> str:
+    """参照音声のクローンで text を読み上げ、生の wav ファイルのパスを返す。
+
+    速度・音量・ピッチは共通層（adapter）の後処理で適用するため、ここでは生の音声を返す。
+    progress_callback は受け取るが Qwen は分割しないので未使用。
+    """
     import soundfile as sf
 
     if not Path(ref_wav).exists():
@@ -62,11 +65,10 @@ def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
     wavs, sr = model.generate_voice_clone(
         text=text, language=language or DEFAULT_LANGUAGE, voice_clone_prompt=prompt,
     )
-    audio = change_speed_keep_pitch(wavs[0], speed)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     out_path = OUTPUT_DIR / f"clone_{stamp}.wav"
-    sf.write(str(out_path), audio, sr)
-    print(f"[Clone] 音声を書き出しました（ref={Path(ref_wav).name}, 速度={speed}）: {out_path}")
+    sf.write(str(out_path), wavs[0], sr)
+    print(f"[Clone] 音声を書き出しました（ref={Path(ref_wav).name}）: {out_path}")
     return str(out_path)

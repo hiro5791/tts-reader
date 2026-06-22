@@ -4,3 +4,6 @@ qwen-tts
 soundfile
 gradio
 tkinterdnd2   # 「保存した声」タブのファイルドラッグ&ドロップ
+librosa       # 後処理（ピッチシフト・タイムストレッチ）
+pypdf         # ファイル読み込み（PDF）
+python-docx   # ファイル読み込み（Word .docx）

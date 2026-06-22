@@ -114,6 +114,13 @@ WAVE_BG = "#f3f3f3"
 WAVE_LINE = "#1f6aa5"
 CURSOR_COLOR = "#e74c3c"
 
+# 読み上げ位置のハイライト色（薄い黄色）
+HL_COLOR = "#ffe9a8"
+
+# 速度・音量・ピッチの3組を横1行にするか縦3段にするかの境目（ウィンドウ幅px）。
+# これより狭いと縦3段、広いと横1行。実機を見て調整してよい。
+SLIDERS_WRAP_WIDTH = 680
+
 ctk.set_appearance_mode("system")       # OSの設定に合わせて明/暗
 ctk.set_default_color_theme("blue")     # ベース。色は下で Windows 風グレーに上書きする
 
@@ -198,6 +205,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._play_start = 0.0
         self._cursor_after_id = None
         self._cursor = None
+        # 機能⑤：読み上げ位置のハイライト用
+        self._gen_text = ""                 # 生成したときの文章（ハイライトの基準）
+        self._sentence_spans: list[tuple[int, int]] = []   # 各文の文字インデックス [start,end)
+        self._sentence_timeline: list[tuple[float, float]] = []  # 各文の再生時間帯
+        self._hl_current = -1               # いまハイライト中の文の番号
         self._voice_items: list[tuple[str, str]] = []   # (表示名キー, 声ID)
         self._voice_map: dict[str, str] = {}            # 表示名 -> 声ID（現在の言語）
         self._current_voice_id: str | None = None
@@ -206,6 +218,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._current_audio_lang: str | None = None
         self._saved_voice_file: str | None = None   # 「保存した声」タブに追加された .mvsvoice（1個まで）
         self._mvsvoice_cache: tuple | None = None    # (path, ref_wav, ref_text, language) の展開キャッシュ
+        self._gen_id = 0                 # 生成の通し番号（停止した生成の結果を無視するため）
+        self._cancel_event = None        # 実行中の生成の中断フラグ（Irodoriサブプロセス停止用）
         self._result_queue: "queue.Queue" = queue.Queue()
 
         # ステータスは「キー＋差し込み値」で覚えておき、言語切替時に貼り替える
@@ -337,9 +351,29 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.audio_lang_menu.pack(side="left", padx=(8, 0))
 
-        # テキスト入力（ラベルなし）
+        # ファイル読み込み（txt / PDF / Word → テキスト欄）。.mvsvoice 用とは別物。
+        open_row = ctk.CTkFrame(self, fg_color="transparent")
+        open_row.pack(fill="x", padx=16, pady=(8, 0))
+        self.btn_open_file = ctk.CTkButton(open_row, text="", width=150,
+                                           command=self._on_open_file)
+        self.btn_open_file.pack(side="left")
+        # チェック時は、読み込んだ内容をテキストの末尾に追加する（OFFなら置き換え）。
+        # 状態は読み込み時に chk_append.get()（1/0）で直接読む（変数バインドに依存しない）。
+        self.chk_append = ctk.CTkCheckBox(open_row, text="")
+        self.chk_append.pack(side="left", padx=(12, 0))
+
+        # テキスト入力（案内文は箱の中に出す。追記・生成時は案内文を本文に数えない）
         self.text_box = ctk.CTkTextbox(self, height=120, wrap="word")
-        self.text_box.pack(fill="both", expand=True, padx=16, pady=(10, 0))
+        self.text_box.pack(fill="both", expand=True, padx=16, pady=(8, 0))
+        # 機能⑤：ハイライト用タグ（読み上げ中の文の背景色）と、編集でハイライト解除
+        self._inner_text = self.text_box._textbox   # 内部の tkinter.Text
+        self._inner_text.tag_config("hl", background=HL_COLOR)
+        self._inner_text.bind("<KeyRelease>", lambda e: self._clear_highlight())
+        # コピー（Ctrl+C）・全選択（Ctrl+A）を確実に効かせる
+        self._inner_text.bind("<Control-c>", self._copy_selection)
+        self._inner_text.bind("<Control-C>", self._copy_selection)
+        self._inner_text.bind("<Control-a>", self._select_all_text)
+        self._inner_text.bind("<Control-A>", self._select_all_text)
 
         # 声：タブ方式（「プリセット」「保存した声」）。タブで自然に排他になる。
         # 将来タブを増やすときは self._voice_tab_keys に i18n キーを足すだけでよい。
@@ -378,18 +412,25 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass   # DnD が使えない環境では「ファイルを選択」だけ使える
 
-        # 速度
-        speed_row = ctk.CTkFrame(self, fg_color="transparent")
-        speed_row.pack(fill="x", padx=16, pady=(10, 0))
-        self.lbl_speed = ctk.CTkLabel(speed_row, text="")
-        self.lbl_speed.pack(side="left")
-        self.speed_value_label = ctk.CTkLabel(speed_row, text="", width=48)
-        self.speed_value_label.pack(side="right")
-        self.speed_slider = ctk.CTkSlider(
-            speed_row, from_=0.5, to=2.0, number_of_steps=15, command=self._on_speed_change
-        )
+        # 速度・音量・ピッチ。広いと横1行、狭いと縦3段に自動で組み替える。
+        controls_row = ctk.CTkFrame(self, fg_color="transparent")
+        controls_row.pack(fill="x", padx=16, pady=(10, 0))
+        g_speed, self.lbl_speed, self.speed_slider, self.speed_value_label = \
+            self._make_slider_group(controls_row, self._on_speed_change,
+                                    dict(from_=0.5, to=2.0, number_of_steps=15))
         self.speed_slider.set(1.0)
-        self.speed_slider.pack(side="left", fill="x", expand=True, padx=10)
+        g_vol, self.lbl_volume, self.volume_slider, self.volume_value_label = \
+            self._make_slider_group(controls_row, self._on_volume_change,
+                                    dict(from_=0.0, to=2.0, number_of_steps=40))
+        self.volume_slider.set(1.0)
+        g_pitch, self.lbl_pitch, self.pitch_slider, self.pitch_value_label = \
+            self._make_slider_group(controls_row, self._on_pitch_change,
+                                    dict(from_=-12, to=12, number_of_steps=24), value_width=56)
+        self.pitch_slider.set(0)
+        self._slider_groups = [g_speed, g_vol, g_pitch]
+        self._sliders_layout = None
+        self._relayout_sliders("h")   # 初期は横1行（直後の Configure で幅に応じて補正）
+        self.bind("<Configure>", self._on_window_configure)
 
         # ボタン類
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
@@ -433,6 +474,44 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         self.status_label.pack(fill="x", padx=16, pady=(12, 14))
 
+    def _make_slider_group(self, parent, command, slider_kwargs, value_width=48):
+        """「ラベル＋短いスライダー＋数値」の1組を作る（パックは _relayout_sliders 側）。
+
+        戻り値は (グループframe, ラベル, スライダー, 数値ラベル)。
+        """
+        g = ctk.CTkFrame(parent, fg_color="transparent")
+        lbl = ctk.CTkLabel(g, text="")
+        lbl.pack(side="left")
+        val = ctk.CTkLabel(g, text="", width=value_width, anchor="w")
+        val.pack(side="right")
+        sld = ctk.CTkSlider(g, command=command, **slider_kwargs)
+        sld.pack(side="left", fill="x", expand=True, padx=(6, 4))
+        return g, lbl, sld, val
+
+    def _relayout_sliders(self, layout: str):
+        """速度・音量・ピッチの3組を、横1行（h）/縦3段（v）に組み替える。"""
+        if layout == self._sliders_layout:
+            return
+        self._sliders_layout = layout
+        for g in self._slider_groups:
+            g.pack_forget()
+        if layout == "h":
+            # 横1行：等幅で並べ、組の間に余白
+            for i, g in enumerate(self._slider_groups):
+                g.pack(side="left", fill="x", expand=True, padx=((16 if i else 0), 0))
+        else:
+            # 縦3段：各組を全幅で積む
+            for i, g in enumerate(self._slider_groups):
+                g.pack(side="top", fill="x", pady=((8 if i else 0), 0))
+
+    def _on_window_configure(self, event):
+        """ウィンドウのリサイズを監視し、幅に応じて横1行/縦3段を切り替える。"""
+        if event.widget is not self:
+            return   # 子ウィジェットの Configure は無視（トップレベルのみ）
+        want = "v" if event.width < SLIDERS_WRAP_WIDTH else "h"
+        if want != self._sliders_layout:   # 閾値をまたいだときだけ組み替え（チラつき防止）
+            self._relayout_sliders(want)
+
     # ---- 言語の切り替え -----------------------------------------------------
     def _on_language_change(self, lang_label: str):
         code = self._lang_label_to_code.get(lang_label, i18n.DEFAULT_LANG)
@@ -449,6 +528,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # ラベル類
         self.lbl_audio_lang.configure(text=self._t("label_audio_language"))
         self.lbl_speed.configure(text=self._t("label_speed"))
+        self.lbl_volume.configure(text=self._t("label_volume"))
+        self.lbl_pitch.configure(text=self._t("label_pitch"))
+        self.btn_open_file.configure(text=self._t("btn_open_file"))
+        self.chk_append.configure(text=self._t("chk_append"))
 
         # 声タブの見出し（タブ名）と「保存した声」のプレースホルダーを言語に合わせる
         for _k in self._voice_tab_keys:
@@ -473,12 +556,14 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.btn_save_audio_file.configure(text=self._t("btn_save_audio_file"))
         self._set_state(self._state)  # 生成ボタンの文字を今の状態に合わせて貼り直す
 
-        # 速度の数値表示
+        # 速度・音量・ピッチの数値表示
         self.speed_value_label.configure(
             text=self._t("speed_value", v=round(float(self.speed_slider.get()), 1))
         )
+        self._on_volume_change(self.volume_slider.get())
+        self._on_pitch_change(self.pitch_slider.get())
 
-        # テキスト欄が「手つかず（プレースホルダのまま／空）」なら言語に合わせて差し替え
+        # テキスト欄が手つかずなら案内文を言語に合わせて差し替える
         self._maybe_update_placeholder()
 
         # 波形（音声があれば描き直し、無ければ案内文）
@@ -491,17 +576,36 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._render_status()
 
     def _placeholder_text(self) -> str:
-        """テキスト欄の案内文。表示言語ではなく『音声言語』に合わせる。"""
+        """案内文。表示言語ではなく『音声言語』に合わせる（箱の外のラベルに出す）。"""
         code = AUDIO_LANG_TO_I18N.get(self._current_audio_lang, self._lang)
         return i18n.t(code, "textbox_placeholder")
 
     def _maybe_update_placeholder(self):
+        """テキスト欄が手つかず（案内文のまま／空）なら、案内文を言語に合わせて差し替える。"""
         current = self.text_box.get("1.0", "end").strip()
-        # どの言語のプレースホルダでも「手つかず」とみなす
         placeholders = {i18n.t(code, "textbox_placeholder") for code in i18n.translations}
         if current == "" or current in placeholders:
             self.text_box.delete("1.0", "end")
             self.text_box.insert("1.0", self._placeholder_text())
+
+    def _actual_text(self) -> str:
+        """テキスト欄の中身（案内文も含め、そのまま）。"""
+        return self.text_box.get("1.0", "end").strip()
+
+    # ---- コピー（Ctrl+C）/ 全選択（Ctrl+A）--------------------------------
+    def _copy_selection(self, event=None):
+        try:
+            sel = self._inner_text.get("sel.first", "sel.last")
+        except Exception:
+            return "break"   # 選択が無ければ何もしない
+        if sel:
+            self.clipboard_clear()
+            self.clipboard_append(sel)
+        return "break"
+
+    def _select_all_text(self, event=None):
+        self._inner_text.tag_add("sel", "1.0", "end-1c")
+        return "break"
 
     # ---- 波形の描画 ---------------------------------------------------------
     def _init_waveform_placeholder(self):
@@ -555,7 +659,7 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._engine = key
         self._refresh_voices(key)
         self._refresh_audio_languages(key)   # 言語の選択肢・状態も連動して切り替える
-        self._maybe_update_placeholder()     # テキストの案内文を音声言語に合わせる
+        self._maybe_update_placeholder()     # 案内文を音声言語に合わせる
         self._save_window_state()   # 選んだエンジン・音声言語をすぐ保存する
 
     def _refresh_voices(self, engine_key: str, preferred: str | None = None):
@@ -633,13 +737,84 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _on_audio_lang_change(self, label: str):
         # 選んだ音声言語を、表示名ではなく言語名（値）で覚えておく
         self._current_audio_lang = self._audio_lang_map.get(label, self._current_audio_lang)
-        self._maybe_update_placeholder()   # テキストの案内文を音声言語に合わせる
+        self._maybe_update_placeholder()   # 案内文を音声言語に合わせる
         self._save_window_state()          # 音声言語の選択を保存する
 
     def _on_speed_change(self, value):
         self.speed_value_label.configure(
             text=self._t("speed_value", v=round(float(value), 1))
         )
+
+    def _on_volume_change(self, value):
+        self.volume_value_label.configure(
+            text=self._t("volume_value", v=int(round(float(value) * 100)))
+        )
+
+    def _on_pitch_change(self, value):
+        n = int(round(float(value)))
+        shown = f"+{n}" if n > 0 else str(n)
+        self.pitch_value_label.configure(text=self._t("pitch_value", v=shown))
+
+    # ---- ファイル読み込み（txt / PDF / Word → テキスト欄）-------------------
+    def _on_open_file(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            filetypes=[("テキスト/PDF/Word", "*.txt *.pdf *.docx"),
+                       ("Text", "*.txt"), ("PDF", "*.pdf"), ("Word", "*.docx"),
+                       ("All files", "*.*")],
+        )
+        if not path:
+            return
+        ext = Path(path).suffix.lower()
+        name = Path(path).name
+        try:
+            if ext == ".txt":
+                text = self._read_txt(path)
+            elif ext == ".pdf":
+                text = self._read_pdf(path)
+            elif ext == ".docx":
+                text = self._read_docx(path)
+            else:
+                self._set_status("open_file_unsupported", error=True, name=name)
+                return
+        except Exception as e:
+            self._set_status("open_file_error", error=True, msg=str(e))
+            return
+        text = (text or "").strip()
+        if not text:
+            self._set_status("open_file_empty", error=True, name=name)
+            return
+        # 「末尾に追加」がONなら今の本文の後ろに足す。OFFなら置き換える。
+        # 実際に文字が入っているか（案内文のままなら空）を _actual_text() で見る。
+        if self.chk_append.get():
+            cur = self._actual_text()
+            text = (cur + "\n" + text) if cur else text
+        self.text_box.delete("1.0", "end")
+        self.text_box.insert("1.0", text)
+        self._clear_highlight()
+        self._set_status("open_file_done", n=len(text), name=name)
+
+    @staticmethod
+    def _read_txt(path: str) -> str:
+        # まず UTF-8、ダメなら cp932（Shift-JIS）で読み直す
+        for enc in ("utf-8", "cp932"):
+            try:
+                return Path(path).read_text(encoding=enc)
+            except UnicodeDecodeError:
+                continue
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+
+    @staticmethod
+    def _read_pdf(path: str) -> str:
+        from pypdf import PdfReader
+        reader = PdfReader(path)
+        return "\n".join((page.extract_text() or "") for page in reader.pages)
+
+    @staticmethod
+    def _read_docx(path: str) -> str:
+        import docx
+        d = docx.Document(path)
+        return "\n".join(p.text for p in d.paragraphs)
 
     # ---- 「保存した声」タブ：.mvsvoice の追加（選択／ドラッグ&ドロップ）-----
     def _refresh_saved_file_label(self):
@@ -749,11 +924,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         )
         if not path:
             return
-        # 書き起こし（ref_text）はテキスト欄の内容。プレースホルダのままなら空にする。
-        ref_text = self.text_box.get("1.0", "end").strip()
-        placeholders = {i18n.t(c, "textbox_placeholder") for c in i18n.translations}
-        if ref_text in placeholders:
-            ref_text = ""
+        # 書き起こし（ref_text）はテキスト欄の本文（案内文のままなら空）。
+        ref_text = self._actual_text()
         voice_json = {
             "format_version": 1,
             "name": Path(path).stem,
@@ -776,7 +948,7 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
     def _on_speak(self):
         if self._state == STATE_GENERATING:
             return
-        text = self.text_box.get("1.0", "end").strip()
+        text = self._actual_text()   # 案内文（プレースホルダ）は本文に数えない
         if not text:
             self._set_status("status_empty", error=True)
             return
@@ -789,6 +961,16 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
 
         engine = ENGINE_LABEL_TO_KEY[self.engine_btn.get()]
         speed = round(float(self.speed_slider.get()), 1)
+        volume = round(float(self.volume_slider.get()), 2)   # 1.0 = 100%
+        pitch = round(float(self.pitch_slider.get()))         # 半音
+        # 分割生成の進捗（Irodori 長文）を左下ステータスに反映する callback。
+        # 別スレッドから呼ばれるので、UI 反映はメインスレッドへ（after）回す。
+        progress = lambda i, n: self.after(0, self._on_chunk_progress, i, n)
+        # 生成の停止用：この生成を識別するIDと、中断フラグ（Irodoriのサブプロセスを止める）
+        self._gen_id += 1
+        gen_id = self._gen_id
+        self._cancel_event = threading.Event()
+        cancel_event = self._cancel_event
 
         # どちらのタブが有効かで、生成の中身（プリセット or 保存した声のクローン）を決める
         if self._is_saved_tab_active():
@@ -802,15 +984,24 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
                 return
             language = mv_lang or self._current_audio_lang
             job = (lambda: synthesize_clone(engine, text, ref_wav,
-                                            ref_text=ref_text, language=language, speed=speed))
+                                            ref_text=ref_text, language=language,
+                                            speed=speed, volume=volume, pitch=pitch,
+                                            progress_callback=progress,
+                                            cancel_event=cancel_event))
             voice_label = Path(self._saved_voice_file).stem
         else:
             voice = self._current_voice_id
             language = self._current_audio_lang
-            job = (lambda: synthesize(text, engine, voice=voice,
-                                      speed=speed, language=language))
+            job = (lambda: synthesize(text, engine, voice=voice, speed=speed,
+                                      volume=volume, pitch=pitch, language=language,
+                                      progress_callback=progress,
+                                      cancel_event=cancel_event))
             voice_label = self.voice_menu.get()
         engine_label = ENGINE_KEY_TO_LABEL.get(engine, engine)
+
+        # 機能⑤：ハイライトの基準は「生成したときの文章」。ここで確定して覚えておく。
+        self._gen_text = text
+        self._clear_highlight()
 
         # 生成ボタンを押したら、前回の波形をクリアする
         self._wav_data = None
@@ -822,22 +1013,31 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._set_status("status_generating")
 
         threading.Thread(
-            target=self._worker, args=(job, engine_label, voice_label, speed), daemon=True
+            target=self._worker, args=(job, engine_label, voice_label, speed, gen_id),
+            daemon=True,
         ).start()
 
-    def _worker(self, job, engine_label, voice_label, speed):
+    def _on_chunk_progress(self, i, n):
+        # 機能③：Irodori 分割生成の進捗を表示（1チャンクだけなら通常の「生成中…」のまま）
+        if self._state == STATE_GENERATING and n > 1:
+            self._set_status("status_generating_progress", i=i, n=n)
+
+    def _worker(self, job, engine_label, voice_label, speed, gen_id):
         try:
             wav = job()
-            self._result_queue.put(("done", wav, engine_label, voice_label, speed))
+            self._result_queue.put(("done", wav, engine_label, voice_label, speed, gen_id))
         except Exception as e:
-            self._result_queue.put(("error", str(e)))
+            self._result_queue.put(("error", str(e), gen_id))
 
     def _poll_result(self):
         try:
             while True:
                 item = self._result_queue.get_nowait()
+                # 停止された生成（ID不一致）の結果は無視する
+                if item[-1] != self._gen_id:
+                    continue
                 if item[0] == "done":
-                    _, wav, engine_label, voice_label, speed = item
+                    _, wav, engine_label, voice_label, speed, _ = item
                     self._on_generation_done(wav, engine_label, voice_label, speed)
                 elif item[0] == "error":
                     self._on_generation_error(item[1])
@@ -857,6 +1057,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._set_status("status_wave_error", error=True, msg=str(e))
             return
 
+        # 機能⑤：完成音声の長さを、各文の文字数で按分してハイライトの時間割を作る
+        self._build_highlight_timeline(self._gen_text, self._audio_duration)
+
         self._start_playback("status_done_playing",
                              engine=engine_label, voice=voice_label, speed=speed)
 
@@ -872,14 +1075,28 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._start_playback("status_playing")
 
     def _on_stop(self):
+        # 生成中の停止：実行中の生成を無効化し、Irodori のサブプロセスは中断フラグで止める。
+        if self._state == STATE_GENERATING:
+            self._cancel_generation()
+            return
+        # 再生中の停止：再生を止める。
         self._cancel_cursor()
         try:
             player.stop()
         except Exception:
             pass
         self._move_cursor(0)
+        self._stop_highlight()   # 機能⑤：停止でハイライトを止める（時間割は残す）
         self._set_state(STATE_READY)
         self._set_status("status_stopped")
+
+    def _cancel_generation(self):
+        """生成を停止する。結果は ID 不一致で無視され、UI はすぐ操作可能に戻る。"""
+        self._gen_id += 1             # 実行中の生成の結果を無効化（無視させる）
+        if self._cancel_event is not None:
+            self._cancel_event.set()  # Irodori のサブプロセスを止める合図
+        self._set_state(STATE_READY if self.current_wav else STATE_IDLE)
+        self._set_status("status_gen_stopped")
 
     def _start_playback(self, status_key, **status_params):
         try:
@@ -906,13 +1123,74 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
             self._on_playback_finished()
             return
         self._move_cursor(elapsed)
+        self._update_highlight(elapsed)   # 機能⑤：いま読んでいる文を光らせる
         self._schedule_cursor()
 
     def _on_playback_finished(self):
         self._cursor_after_id = None
         self._move_cursor(0)
+        self._stop_highlight()   # 色は消すが時間割は残す（再生し直せば再び光る）
         self._set_state(STATE_READY)
         self._set_status("status_finished")
+
+    # ---- 機能⑤：読み上げ位置のハイライト ----------------------------------
+    def _build_highlight_timeline(self, text: str, duration: float):
+        """文に分割し、総再生時間を文字数比で按分して各文の再生時間帯を作る。"""
+        self._sentence_spans = self._sentence_spans_of(text)
+        self._sentence_timeline = []
+        self._hl_current = -1
+        total = sum(e - s for s, e in self._sentence_spans)
+        if total <= 0 or duration <= 0:
+            return
+        t = 0.0
+        for s, e in self._sentence_spans:
+            dur = duration * (e - s) / total
+            self._sentence_timeline.append((t, t + dur))
+            t += dur
+
+    @staticmethod
+    def _sentence_spans_of(text: str) -> list[tuple[int, int]]:
+        """「。」「！」「？」「改行」で文に分け、各文の文字インデックス [start,end) を返す。"""
+        spans = []
+        start = 0
+        for idx, ch in enumerate(text):
+            if ch in "。！？\n":
+                spans.append((start, idx + 1))
+                start = idx + 1
+        if start < len(text):
+            spans.append((start, len(text)))
+        # 空白だけの区間は除外（位置インデックスはそのまま）
+        return [(s, e) for s, e in spans if text[s:e].strip()]
+
+    def _update_highlight(self, elapsed: float):
+        """経過秒に対応する文だけ背景色を付ける（前の文の色は消す）。"""
+        if not self._sentence_timeline:
+            return
+        idx = -1
+        for i, (t0, t1) in enumerate(self._sentence_timeline):
+            if t0 <= elapsed < t1:
+                idx = i
+                break
+        if idx == self._hl_current:
+            return
+        self._hl_current = idx
+        self._inner_text.tag_remove("hl", "1.0", "end")
+        if 0 <= idx < len(self._sentence_spans):
+            s, e = self._sentence_spans[idx]
+            self._inner_text.tag_add("hl", f"1.0+{s}c", f"1.0+{e}c")
+
+    def _stop_highlight(self):
+        """ハイライトの色だけ消す（停止・再生終了時）。時間割は残し、再生し直せば再び光る。"""
+        self._hl_current = -1
+        try:
+            self._inner_text.tag_remove("hl", "1.0", "end")
+        except Exception:
+            pass
+
+    def _clear_highlight(self):
+        """ハイライトを完全に消す（テキスト編集・新規生成時）。時間割も無効化する。"""
+        self._sentence_timeline = []
+        self._stop_highlight()
 
     def _cancel_cursor(self):
         if self._cursor_after_id is not None:
@@ -937,7 +1215,8 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         if self._is_saved_tab_active() and self._saved_voice_file is None:
             speak_on = False
         play_on = state == STATE_READY
-        stop_on = state == STATE_PLAYING
+        # 停止ボタンは「再生中」だけでなく「生成中」も有効（生成を止められる）
+        stop_on = state in (STATE_PLAYING, STATE_GENERATING)
         # 生成中・再生中はエンジン／声を変えられないようにする（待機中だけ操作可）
         controls_on = state in (STATE_IDLE, STATE_READY)
         self.speak_btn.configure(
@@ -950,6 +1229,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.voice_menu.configure(state="normal" if controls_on else "disabled")
         # 生成中・再生中はタブ（プリセット／保存した声）の切り替えも無効化
         self.voice_tabview.configure(state="normal" if controls_on else "disabled")
+        # 機能①：生成中はテキストを編集できないようにする（音声と文章のズレ防止）。
+        # 別スレッドからではなく、必ずこのメインスレッドの状態更新で切り替える。
+        self.text_box.configure(state="disabled" if state == STATE_GENERATING else "normal")
+        self.btn_open_file.configure(state="disabled" if state == STATE_GENERATING else "normal")
         # 保存ボタンは、保存するもの（生成済み音声）が無いときは無効
         save_on = self._wav_data is not None
         self.btn_save_audio_file.configure(state="normal" if save_on else "disabled")
