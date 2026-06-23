@@ -50,12 +50,38 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# 配布（PyInstaller）で同梱したモデルを使う。
+# frozen（exe化）かつ同梱 models/（HF キャッシュ）があれば、そこを HF_HOME に向け、
+# オフライン扱いにする（別PCでもネット無しで動く）。開発時（非frozen）は何もしない。
+if getattr(sys, "frozen", False):
+    _base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    _bundled_models = _base / "models"
+    if _bundled_models.exists():
+        os.environ.setdefault("HF_HOME", str(_bundled_models))
+        os.environ.setdefault("MVS_OFFLINE", "1")
+
 # オフライン同梱配布用：MVS_OFFLINE=1 のとき、モデルのダウンロードを試みず
 # ローカルキャッシュだけを使う（ネットが無くても起動・生成できる）。
 # モデルを HF から取り込むより前（ここ）で設定しておく必要がある。
 if os.environ.get("MVS_OFFLINE", "").strip().lower() in ("1", "true", "yes", "on"):
     os.environ.setdefault("HF_HUB_OFFLINE", "1")
     os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+
+# オフライン時の不具合回避：
+# transformers 4.57 のトークナイザ読み込みは内部の _patch_mistral_regex →
+# is_base_mistral() で model_info()（ネットAPI）を呼ぶため、HF_HUB_OFFLINE=1 だと
+# 必ず OfflineModeIsEnabled で落ちる。Qwen/Irodori は Mistral ではなくこの処理は不要なので、
+# オフライン時はこのメソッドを「トークナイザをそのまま返す」no-op に差し替えてネット参照を防ぐ。
+if os.environ.get("HF_HUB_OFFLINE") == "1":
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase as _PTTB
+
+        def _skip_mistral_patch(cls, tokenizer, *args, **kwargs):
+            return tokenizer
+
+        _PTTB._patch_mistral_regex = classmethod(_skip_mistral_patch)
+    except Exception:
+        pass
 
 import numpy as np
 import customtkinter as ctk
@@ -101,10 +127,13 @@ APP_VERSION = "1.0.0"
 # 「問題を報告」ボタンから開く Google フォーム
 REPORT_FORM_URL = "https://forms.gle/7ci3VpBVVA4jcw8U7"
 
+# 設定・ウィンドウ状態は「書き込み可能なデータフォルダ」に置く。
+# 配布(MSIX)版はインストール先が読み取り専用のため、ここを誤ると保存に失敗する。
+from tts.paths import data_root
 # ウィンドウのサイズ・位置を覚えておくファイル
-WINDOW_STATE_FILE = Path(__file__).resolve().parent / "window_state.json"
+WINDOW_STATE_FILE = data_root() / "window_state.json"
 # 設定ファイル（最小限：エンジンと声だけ）
-SETTINGS_FILE = Path(__file__).resolve().parent / "settings.json"
+SETTINGS_FILE = data_root() / "settings.json"
 DEFAULT_SIZE = (700, 800)   # 初回（保存が無いとき）の大きさ
 MIN_SIZE = (600, 700)       # これより小さくはしない
 
@@ -127,8 +156,10 @@ CURSOR_COLOR = "#e74c3c"
 HL_COLOR = "#ffe9a8"
 
 # 速度・音量・ピッチの3組を横1行にするか縦3段にするかの境目（ウィンドウ幅px）。
-# これより狭いと縦3段、広いと横1行。実機を見て調整してよい。
-SLIDERS_WRAP_WIDTH = 680
+# 縦3段にすると背が高くなり、下の保存ボタン/状態バーが画面外に押し出されてしまうため、
+# 実用上は常に横1行にする（最小ウィンドウ幅600でもスライダー幅を小さくして収める）。
+# これより狭いと縦3段になるが、最小幅600より小さくできないので実質発動しない。
+SLIDERS_WRAP_WIDTH = 400
 
 ctk.set_appearance_mode("system")       # OSの設定に合わせて明/暗
 ctk.set_default_color_theme("blue")     # ベース。色は下で Windows 風グレーに上書きする
@@ -523,7 +554,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         lbl.pack(side="left")
         val = ctk.CTkLabel(g, text="", width=value_width, anchor="w")
         val.pack(side="right")
-        sld = ctk.CTkSlider(g, command=command, **slider_kwargs)
+        # CTkSlider の既定幅(約200px)は3本横並びだと収まらず右端が見切れる。
+        # 小さめの幅にしておき、横に余裕があれば fill/expand で伸びるようにする。
+        sld = ctk.CTkSlider(g, command=command, width=70, **slider_kwargs)
         sld.pack(side="left", fill="x", expand=True, padx=(6, 4))
         return g, lbl, sld, val
 
@@ -535,9 +568,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         for g in self._slider_groups:
             g.pack_forget()
         if layout == "h":
-            # 横1行：等幅で並べ、組の間に余白
+            # 横1行：等幅で並べ、組の間に少し余白（詰まりすぎ＆見切れ防止）
             for i, g in enumerate(self._slider_groups):
-                g.pack(side="left", fill="x", expand=True, padx=((16 if i else 0), 0))
+                g.pack(side="left", fill="x", expand=True, padx=((10 if i else 0), 0))
         else:
             # 縦3段：各組を全幅で積む
             for i, g in enumerate(self._slider_groups):

@@ -56,8 +56,8 @@ IRODORI_DIR = Path(__file__).resolve().parent.parent / "vendor" / "Irodori-TTS"
 # 用意した参照音声（声プリセット）の置き場所
 VOICES_DIR = Path(__file__).resolve().parent.parent / "voices" / "irodori"
 
-# 出力先フォルダ
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
+# 出力先フォルダ（配布版は書き込み可能なユーザーフォルダ。paths.py で一元管理）
+from .paths import outputs_dir
 
 # ---- 選べる声 ----------------------------------------------------------------
 # 声の定義はこの VOICES 辞書 1か所にまとめる（編集・追加はここだけでよい）。
@@ -115,6 +115,133 @@ class GenerationCancelled(Exception):
     """生成がユーザーにより停止されたことを表す（アプリ側で結果は無視される）。"""
 
 
+# ---- 同一プロセス実行（脱 uv／PyInstaller 同梱用）----------------------------
+# infer.py を別プロセス（uv run）で呼ぶ従来方式は、配布パッケージに uv や別 venv が
+# 無いため動かない。そこで「必要依存が同じ環境にそろっていれば、irodori_tts を
+# 直接 import して同一プロセスで実行する」経路を用意する。依存が無い開発環境では
+# 自動的に従来の uv サブプロセスにフォールバックする（_run_infer 内で分岐）。
+#
+# 実行に必要なランタイム依存（import 名）。これらが全て見つかれば in-process 可。
+_INPROC_DEPS = (
+    "torch", "torchaudio", "torchcodec", "dacvae", "silentcipher",
+    "peft", "sentencepiece", "safetensors", "transformers", "huggingface_hub",
+)
+_inproc_cache: bool | None = None
+
+
+def _ensure_vendor_on_path() -> None:
+    """vendor/Irodori-TTS を import 経路に追加（irodori_tts を読めるようにする）。"""
+    p = str(IRODORI_DIR)
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+
+def _inproc_available() -> bool:
+    """同一プロセスで irodori_tts を実行できる（必要依存がそろっている）か。"""
+    global _inproc_cache
+    if _inproc_cache is not None:
+        return _inproc_cache
+    import importlib.util
+    ok = all(importlib.util.find_spec(m) is not None for m in _INPROC_DEPS)
+    if ok:
+        _ensure_vendor_on_path()
+        try:
+            ok = importlib.util.find_spec("irodori_tts") is not None
+        except Exception:
+            ok = False
+    _inproc_cache = bool(ok)
+    return _inproc_cache
+
+
+def _parse_voice_args(voice_args: list[str]) -> tuple[str | None, str | None, bool]:
+    """CLI 形式の voice_args を (caption, ref_wav, no_ref) に読み解く。"""
+    caption = ref_wav = None
+    no_ref = False
+    it = iter(voice_args)
+    for a in it:
+        if a == "--caption":
+            caption = next(it, None)
+        elif a == "--ref-wav":
+            ref_wav = next(it, None)
+        elif a == "--no-ref":
+            no_ref = True
+    return caption, ref_wav, no_ref
+
+
+def _run_infer_inproc(checkpoint: str, text: str, voice_args: list[str],
+                      duration_scale: float, out_path: Path) -> str:
+    """irodori_tts を同一プロセスで実行して wav を書き出す（infer.py の既定値に準拠）。"""
+    _ensure_vendor_on_path()
+    from huggingface_hub import hf_hub_download
+    from irodori_tts.inference_runtime import (
+        InferenceRuntime, RuntimeKey, SamplingRequest,
+        default_runtime_device, resolve_cfg_scales, save_wav,
+    )
+
+    caption, ref_wav, no_ref = _parse_voice_args(voice_args)
+    # チェックポイント（重み）を取得（同梱/キャッシュがあればそこから）。
+    ckpt_path = hf_hub_download(repo_id=checkpoint, filename="model.safetensors")
+    # 空きVRAMが足りなければ CPU にフォールバック（遅いが落ちない）。
+    from .device import pick_device
+    device = pick_device(5.0)
+
+    runtime = InferenceRuntime.from_key(RuntimeKey(
+        checkpoint=ckpt_path, model_device=device,
+        codec_repo="Aratako/Semantic-DACVAE-Japanese-32dim",
+        model_precision="fp32", codec_device=device, codec_precision="fp32",
+        codec_deterministic_encode=True, codec_deterministic_decode=True,
+        compile_model=False, compile_dynamic=False,
+    ))
+    use_speaker = bool(runtime.model_cfg.use_speaker_condition_resolved and not no_ref)
+    use_caption = bool(runtime.model_cfg.use_caption_condition
+                       and caption is not None and str(caption).strip() != "")
+    cfg_text, cfg_cap, cfg_spk, _msgs = resolve_cfg_scales(
+        cfg_guidance_mode="independent",
+        cfg_scale_text=3.0, cfg_scale_caption=3.0, cfg_scale_speaker=5.0,
+        cfg_scale=None, use_caption_condition=use_caption,
+        use_speaker_condition=use_speaker,
+    )
+    result = runtime.synthesize(SamplingRequest(
+        text=str(text), caption=caption, ref_wav=ref_wav, ref_latent=None,
+        ref_embed=None, no_ref=bool(no_ref), ref_normalize_db=-16.0, ref_ensure_max=True,
+        num_candidates=1, decode_mode="sequential", seconds=None,
+        duration_scale=float(duration_scale), max_ref_seconds=30.0,
+        max_text_len=None, max_caption_len=None, num_steps=40,
+        cfg_scale_text=cfg_text, cfg_scale_caption=cfg_cap, cfg_scale_speaker=cfg_spk,
+        cfg_guidance_mode="independent", cfg_scale=None, cfg_min_t=0.5, cfg_max_t=1.0,
+        truncation_factor=None, rescale_k=None, rescale_sigma=None,
+        context_kv_cache=True, speaker_kv_scale=None, speaker_kv_min_t=None,
+        speaker_kv_max_layers=None, speaker_uncond_mode="mask", seed=None,
+        t_schedule_mode="linear", sway_coeff=-1.0, trim_tail=True,
+        tail_window_size=20, tail_std_threshold=0.05, tail_mean_threshold=0.1,
+        lora_adapter=None,
+    ), log_fn=None)
+    save_wav(str(out_path), result.audio, result.sample_rate)
+
+    # Irodori はモデルを保持し続けないよう、ここで明示的にVRAM/RAMを解放する。
+    # （これをしないと、他エンジンへ切り替えたとき VRAM が累積して c10.dll が
+    #   アクセス違反でクラッシュする。8GB級GPUでは特に重要。）
+    import gc
+    try:
+        del result
+        del runtime
+    except Exception:
+        pass
+    try:
+        from irodori_tts.inference_runtime import clear_cached_runtime
+        clear_cached_runtime()
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    return str(out_path)
+
+
 def _run_infer(checkpoint: str, text: str, voice_args: list[str], speed: float,
                tag: str = "", cancel_event=None) -> str:
     """infer.py を実行して wav を書き出し、そのパスを返す（共通処理）。
@@ -130,14 +257,25 @@ def _run_infer(checkpoint: str, text: str, voice_args: list[str], speed: float,
     if cancel_event is not None and cancel_event.is_set():
         raise GenerationCancelled()
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"irodori_{stamp}.wav"
+    out_path = outputs_dir() / f"irodori_{stamp}.wav"
 
     # 速度 → duration-scale（>1 で長く=遅く、<1 で短く=速く）。速度の逆数を渡す。
     speed = max(0.1, float(speed))
     duration_scale = round(1.0 / speed, 3)
 
+    # 依存が同一環境にそろっていれば、uv の別プロセスを使わず同一プロセスで実行する。
+    # （配布パッケージ＝PyInstaller ではこちらの経路になる。停止は次チャンク境界で効く）
+    if _inproc_available():
+        print(f"[Irodori] 実行（in-process, {tag}, モデル={checkpoint}, 速度={speed}, "
+              f"duration-scale={duration_scale}） ...（初回はモデル読み込みで時間がかかります）")
+        path = _run_infer_inproc(checkpoint, text, voice_args, duration_scale, out_path)
+        if cancel_event is not None and cancel_event.is_set():
+            raise GenerationCancelled()
+        print(f"[Irodori] 音声を書き出しました（in-process, {tag}, 速度={speed}）: {path}")
+        return path
+
+    # --- 開発時フォールバック：uv の別 venv で infer.py を実行（従来方式）---
     uv = _find_uv()
     uv_prefix = [uv] if uv else [sys.executable, "-m", "uv"]
     cmd = [
@@ -256,9 +394,8 @@ def _generate_chunked(checkpoint: str, text: str, voice_args: list[str], tag: st
                 pass
 
     merged = concat_with_silence(audios, sr, gap_sec=_CHUNK_GAP_SEC)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"irodori_merged_{stamp}.wav"
+    out_path = outputs_dir() / f"irodori_merged_{stamp}.wav"
     sf.write(str(out_path), merged, sr)
     print(f"[Irodori] {n} チャンクを連結しました: {out_path}")
     return str(out_path)

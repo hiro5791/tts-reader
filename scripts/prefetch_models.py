@@ -36,7 +36,22 @@ MODELS = {
     "codec": [
         "Aratako/Semantic-DACVAE-Japanese-32dim",
     ],
+    # Irodori が内部で使うテキストトークナイザ（モデル重みは不要。設定/トークナイザのみ）
+    "tokenizer": [
+        "llm-jp/llm-jp-3-150m",            # 本文のテキストトークナイザ
+        "openai/clip-vit-large-patch14",  # caption（声の説明）のテキストトークナイザ
+    ],
+    # Irodori が使う補助モデル（重み込みで必要）
+    "aux": [
+        "sony/silentcipher",              # 音声透かし(watermark)モデル（.ckpt 重み）
+    ],
 }
+
+# 重み（巨大）は不要で、設定・トークナイザのファイルだけ要るリポジトリ。
+# これらは *.safetensors 等の重みを除外してダウンロードする（同梱サイズ削減）。
+TOKENIZER_ONLY = {"llm-jp/llm-jp-3-150m", "openai/clip-vit-large-patch14"}
+_WEIGHT_PATTERNS = ["*.safetensors", "*.bin", "*.pt", "*.pth", "*.h5", "*.msgpack",
+                    "*.gguf", "*.onnx", "*.ckpt"]
 
 
 def _all_repos() -> list[str]:
@@ -64,8 +79,9 @@ def cmd_check() -> int:
 
     missing = []
     for repo in _all_repos():
+        ignore = _WEIGHT_PATTERNS if repo in TOKENIZER_ONLY else None
         try:
-            snapshot_download(repo_id=repo, local_files_only=True)
+            snapshot_download(repo_id=repo, local_files_only=True, ignore_patterns=ignore)
             print(f"OK   {repo}")
         except (LocalEntryNotFoundError, Exception):
             print(f"未取得 {repo}")
@@ -81,8 +97,10 @@ def cmd_download(repos: list[str]) -> int:
     from huggingface_hub import snapshot_download
 
     for repo in repos:
-        print(f"=== ダウンロード中: {repo} （途中まであれば続きから）===")
-        path = snapshot_download(repo_id=repo)   # 既定のHFキャッシュへ。resume 対応。
+        ignore = _WEIGHT_PATTERNS if repo in TOKENIZER_ONLY else None
+        note = "（トークナイザ/設定のみ・重み除外）" if ignore else "（途中まであれば続きから）"
+        print(f"=== ダウンロード中: {repo} {note}===")
+        path = snapshot_download(repo_id=repo, ignore_patterns=ignore)   # 既定のHFキャッシュへ。resume 対応。
         print(f"完了: {repo}\n  -> {path}\n")
     print("モデルの準備ができました。初回生成のダウンロード待ちは無くなります。")
     return 0

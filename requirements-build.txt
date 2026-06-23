@@ -1,0 +1,54 @@
+# =============================================================================
+# 配布ビルド用の「統合環境」依存リスト
+#   目的: app.py / Qwen3-TTS / Irodori-TTS を 1 つの Python 環境に入れて、
+#        Irodori を uv 別プロセスでなく「同一プロセス（in-process）」で動かす。
+#        これにより PyInstaller で 1 つにまとめてストア配布できる。
+#
+#   ※ 開発用の .venv（requirements.txt）とは別に、専用のビルド環境を作って使うこと。
+#      作業中のアプリ環境を壊さないため。
+#
+# -----------------------------------------------------------------------------
+# 手順:
+#   1) 新しい仮想環境を作る（例）:  py -3.11 -m venv .venv-build
+#   2) torch 系を先に CUDA 版で入れる（Irodori の torchcodec<0.11 に合わせ 2.10 系で統一）:
+#        pip install "torch==2.10.*" "torchaudio==2.10.*" "torchcodec==0.10.*" \
+#            --index-url https://download.pytorch.org/whl/cu128
+#      （qwen-tts / transformers は torch のバージョンに寛容なので 2.10 で動く見込み。
+#        実機で Qwen / Irodori 両方の生成が通ることを必ず確認すること）
+#   3) 残りを入れる:  pip install -r requirements-build.txt
+#   4) モデルを取得:  python scripts/prefetch_models.py
+#   5) 動作確認:  python app.py で Qwen と Irodori 両方の生成を確認
+#        （Irodori が "in-process" ログで動けば脱 uv 成功。uv は不要）
+# =============================================================================
+
+# --- アプリ本体（app.py / Qwen3-TTS）-----------------------------------------
+qwen-tts
+soundfile
+sounddevice          # 音声の再生（再生ボタン）
+tkinterdnd2          # 「保存した声」タブのファイルドラッグ&ドロップ
+librosa              # 後処理（ピッチシフト・タイムストレッチ）
+pypdf                # ファイル読み込み（PDF）
+python-docx          # ファイル読み込み（Word .docx）
+matplotlib           # 波形表示
+customtkinter        # GUI
+numpy
+huggingface-hub
+transformers<5
+
+# --- Irodori-TTS を同一プロセスで動かすために必要なランタイム依存 -------------
+#   （torch / torchaudio / torchcodec は上の手順2で別途インストール）
+peft>=0.18.0
+# 注: Irodori の元ピンは <0.2 だが、Python 3.13 では 0.1.x の wheel が無く
+#     ソースビルドに失敗するため、cp313 wheel のある 0.2 系を使う。
+sentencepiece>=0.2.0
+safetensors>=0.7.0
+numba>=0.57.0
+llvmlite>=0.40.0
+pyyaml>=6.0
+tqdm>=4.67.3
+# git 依存（インストールに git とビルド環境が必要）
+dacvae @ git+https://github.com/facebookresearch/dacvae
+silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152
+
+# 注: datasets / wandb / gradio は Irodori の「学習・デモ」用で「推論」には不要なため
+#     あえて入れない（同梱サイズを小さく保つ。in-process 推論では import されない）。

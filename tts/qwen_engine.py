@@ -41,8 +41,8 @@ LANGUAGES = [
 DEFAULT_LANGUAGE = "English"
 _VALID_LANGUAGES = {val for _key, val in LANGUAGES}
 
-# 出力先フォルダ
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
+# 出力先フォルダ（配布版は書き込み可能なユーザーフォルダ。paths.py で一元管理）
+from .paths import outputs_dir
 
 # ---- 選べる声（プリセット話者）-----------------------------------------------
 # (表示名の i18n キー, 内部の話者ID) の組。日本語ネイティブの ono_anna を先頭（初期値）にする。
@@ -88,13 +88,10 @@ def _get_model():
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    # GPU が使えるか確認。使えなければ CPU（とても遅い）になる。
-    if torch.cuda.is_available():
-        device = "cuda:0"
-        dtype = torch.float16  # float16 は GPU で安定して速い
-    else:
-        device = "cpu"
-        dtype = torch.float32
+    # GPU に十分な空きVRAMがあれば cuda、無ければ CPU（遅いが確実に動く）。
+    from .device import pick_device
+    device = pick_device(5.0)   # 1.7B fp16 ≈ 3.4GB ＋ 生成時の余裕
+    dtype = torch.float16 if device.startswith("cuda") else torch.float32
 
     print(f"[Qwen3] モデルを読み込みます（初回は時間がかかります）: {MODEL_NAME} on {device}")
     _model = Qwen3TTSModel.from_pretrained(
@@ -136,9 +133,8 @@ def synthesize(text: str, voice: str = DEFAULT_VOICE,
     )
     audio = wavs[0]
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"qwen3_{stamp}.wav"
+    out_path = outputs_dir() / f"qwen3_{stamp}.wav"
     sf.write(str(out_path), audio, sr)
     print(f"[Qwen3] 音声を書き出しました（話者={speaker}, 言語={language}, 喋り方={style!r}）: {out_path}")
     return str(out_path)
