@@ -13,7 +13,7 @@ from pathlib import Path
 # Base（クローン対応）モデル
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
 DEFAULT_LANGUAGE = "Japanese"
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
+from .paths import outputs_dir
 
 _model = None
 _prompt_cache: dict = {}
@@ -27,7 +27,10 @@ def _get_model():
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    # クローンは float32 必須＝1.7Bで約6.8GBと重い。8GB級GPUでは収まらないことが多いので
+    # 必要VRAMを大きめ(7.5GB)に見て、足りなければ CPU で実行する（遅いが落ちない）。
+    from .device import pick_device
+    device = pick_device(7.5)
     print(f"[Clone] Base モデルを読み込みます（初回は時間がかかります）: {MODEL_NAME} on {device}")
     _model = Qwen3TTSModel.from_pretrained(
         MODEL_NAME, device_map=device, dtype=torch.float32, attn_implementation="sdpa",
@@ -66,9 +69,8 @@ def synthesize_clone(text: str, ref_wav: str, ref_text: str | None = None,
         text=text, language=language or DEFAULT_LANGUAGE, voice_clone_prompt=prompt,
     )
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"clone_{stamp}.wav"
+    out_path = outputs_dir() / f"clone_{stamp}.wav"
     sf.write(str(out_path), wavs[0], sr)
     print(f"[Clone] 音声を書き出しました（ref={Path(ref_wav).name}）: {out_path}")
     return str(out_path)

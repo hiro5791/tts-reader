@@ -36,6 +36,48 @@ def _engine_module(engine: str):
     raise ValueError(f"知らないエンジンです: {engine!r}（使えるのは {list(ENGINES)} ）")
 
 
+# モデルを保持し続ける Qwen 系エンジン（それぞれ別チェックポイント＝VRAMを大きく使う）
+_MODEL_HOLDERS = ("tts.qwen_engine", "tts.qwen_design_engine", "tts.clone_engine")
+
+
+def _free_models(keep: str | None = None) -> None:
+    """読み込み済みモデルをメモリ（VRAM/RAM）から解放する。
+
+    各エンジンは一度読み込んだモデルを保持し続けるため、プリセット→声を作る→
+    クローン…と切り替えると VRAM が累積し、8GB 級GPUでは枯渇してクラッシュする。
+    そこで「新しいモデルを読む前に、今使わないモデルを解放」して、同時に載るのを
+    実質1モデルに保つ。keep に渡したモジュールだけは残す（同じ操作の連続を速くする）。
+    """
+    import sys
+    import gc
+
+    for name in _MODEL_HOLDERS:
+        if name == keep:
+            continue
+        mod = sys.modules.get(name)
+        if mod is None:
+            continue
+        if getattr(mod, "_model", None) is not None:
+            mod._model = None
+        pc = getattr(mod, "_prompt_cache", None)
+        if isinstance(pc, dict):
+            pc.clear()
+    # Irodori（同一プロセス実行）のランタイムキャッシュも解放（あれば）
+    try:
+        irt = sys.modules.get("irodori_tts.inference_runtime")
+        if irt is not None and hasattr(irt, "clear_cached_runtime"):
+            irt.clear_cached_runtime()
+    except Exception:
+        pass
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 def list_voices(engine: str) -> list[tuple[str, str]]:
     """そのエンジンで選べる声の一覧を返す。
 
@@ -119,10 +161,12 @@ def synthesize(text: str, engine: str, voice: str | None = None, speed: float = 
         # 声を作る：Qwen=VoiceDesignモデル / Irodori=VoiceDesign版モデル(caption)
         if engine == "qwen3":
             from . import qwen_design_engine
+            _free_models(keep="tts.qwen_design_engine")  # 他モデルを解放してVRAM枯渇を防ぐ
             raw = qwen_design_engine.synthesize_design(
                 text, instruct=(voice_description or ""), language=language,
                 progress_callback=progress_callback, cancel_event=cancel_event)
         elif engine == "irodori":
+            _free_models(keep=None)   # Qwen系を全解放（Irodoriはランタイムを都度作る）
             raw = module.synthesize_design(
                 text, caption=(voice_description or ""), language=language,
                 progress_callback=progress_callback, cancel_event=cancel_event)
@@ -133,10 +177,12 @@ def synthesize(text: str, engine: str, voice: str | None = None, speed: float = 
         if voice is None:
             voice = module.DEFAULT_VOICE
         if engine == "qwen3":
+            _free_models(keep="tts.qwen_engine")
             raw = module.synthesize(
                 text, voice=voice, language=language, style=style,
                 progress_callback=progress_callback, cancel_event=cancel_event)
         else:
+            _free_models(keep=None)
             raw = module.synthesize(
                 text, voice=voice, language=language,
                 progress_callback=progress_callback, cancel_event=cancel_event)
@@ -165,6 +211,7 @@ def synthesize_clone(engine: str, text: str, ref_wav: str, ref_text: str | None 
         from . import clone_engine
         if language is None:
             language = clone_engine.DEFAULT_LANGUAGE
+        _free_models(keep="tts.clone_engine")  # 他モデルを解放（Baseはfp32で重いので特に重要）
         raw = clone_engine.synthesize_clone(
             text, ref_wav=ref_wav, ref_text=ref_text, language=language,
             progress_callback=progress_callback, cancel_event=cancel_event)
@@ -172,6 +219,7 @@ def synthesize_clone(engine: str, text: str, ref_wav: str, ref_text: str | None 
         from . import irodori_engine
         if language is None:
             language = irodori_engine.DEFAULT_LANGUAGE
+        _free_models(keep=None)
         raw = irodori_engine.synthesize_clone(
             text, ref_wav=ref_wav, ref_text=ref_text, language=language,
             progress_callback=progress_callback, cancel_event=cancel_event)

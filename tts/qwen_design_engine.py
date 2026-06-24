@@ -16,7 +16,7 @@ from pathlib import Path
 
 MODEL_NAME = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
 DEFAULT_LANGUAGE = "Japanese"
-OUTPUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
+from .paths import outputs_dir
 
 _model = None
 
@@ -29,10 +29,9 @@ def _get_model():
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    if torch.cuda.is_available():
-        device, dtype = "cuda:0", torch.float16
-    else:
-        device, dtype = "cpu", torch.float32
+    from .device import pick_device
+    device = pick_device(5.0)   # 1.7B fp16 ≈ 3.4GB ＋ 余裕
+    dtype = torch.float16 if device.startswith("cuda") else torch.float32
     print(f"[VoiceDesign] モデルを読み込みます（初回は時間がかかります）: {MODEL_NAME} on {device}")
     _model = Qwen3TTSModel.from_pretrained(
         MODEL_NAME, device_map=device, dtype=dtype, attn_implementation="sdpa",
@@ -58,9 +57,8 @@ def synthesize_design(text: str, instruct: str = "",
     )
     audio = wavs[0]
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out_path = OUTPUT_DIR / f"qwen_design_{stamp}.wav"
+    out_path = outputs_dir() / f"qwen_design_{stamp}.wav"
     sf.write(str(out_path), audio, sr)
     print(f"[VoiceDesign] 音声を書き出しました（説明={instruct!r}, 言語={language}）: {out_path}")
     return str(out_path)

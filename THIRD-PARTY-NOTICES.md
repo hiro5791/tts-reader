@@ -13,10 +13,14 @@
 |---|---|---|---|
 | Qwen3-TTS-12Hz-1.7B-CustomVoice（モデル重み） | Apache-2.0 | Alibaba Cloud / Qwen Team | https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice |
 | Qwen3-TTS-12Hz-1.7B-Base（モデル重み） | Apache-2.0 | Alibaba Cloud / Qwen Team | https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base |
+| Qwen3-TTS-12Hz-1.7B-VoiceDesign（モデル重み） | Apache-2.0 | Alibaba Cloud / Qwen Team | https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign |
 | Irodori-TTS-500M-v3（モデル重み） | MIT | Aratako | https://huggingface.co/Aratako/Irodori-TTS-500M-v3 |
 | Irodori-TTS-600M-v3-VoiceDesign（モデル重み） | MIT | Aratako | https://huggingface.co/Aratako/Irodori-TTS-600M-v3-VoiceDesign |
 | Semantic-DACVAE-Japanese-32dim（codec 重み） | MIT | Aratako | https://huggingface.co/Aratako/Semantic-DACVAE-Japanese-32dim |
 | facebook/dacvae-watermarked（codec のベース） | Apache-2.0 | Meta Platforms, Inc. | https://huggingface.co/facebook/dacvae-watermarked |
+| llm-jp/llm-jp-3-150m（本文トークナイザ・設定のみ同梱） | Apache-2.0 | LLM-jp | https://huggingface.co/llm-jp/llm-jp-3-150m |
+| openai/clip-vit-large-patch14（caption トークナイザ・設定のみ同梱） | MIT | OpenAI | https://huggingface.co/openai/clip-vit-large-patch14 |
+| sony/silentcipher（音声透かしモデル重み） | MIT | Sony | https://huggingface.co/sony/silentcipher |
 
 ## 2. 同梱コード（リポジトリ）
 
