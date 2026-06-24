@@ -13,7 +13,7 @@
   <Identity
     Name="9B6C9F60.MultiVoiceStudio"
     Publisher="CN=E5A55C73-7E5B-4BF9-B37E-C562F23A3A5E"
-    Version="1.0.0.0"
+    Version="1.0.1.0"
     ProcessorArchitecture="x64" />
 
   <Properties>
