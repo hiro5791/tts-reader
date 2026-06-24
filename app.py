@@ -377,9 +377,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # 上部バー：エンジン選択（左・ラベルなし）／情報ボタン・言語切り替え（右）
         top = ctk.CTkFrame(self, fg_color="transparent")
         top.pack(fill="x", padx=16, pady=(12, 0))
-        # 情報ボタンは右上の一番端。押すとアプリ名・バージョン・問題報告のダイアログを出す。
-        self.info_btn = ctk.CTkButton(top, text="", width=80, command=self._show_info)
-        self.info_btn.pack(side="right")
+        # 旧「情報」ボタンは廃止。ウィンドウ上部のメニューバー
+        # （ヘルプ ＞ バージョン情報／お問い合わせ ＞ 問題を報告）に移行した。
+        self._build_menubar()
         self.lang_btn = ctk.CTkOptionMenu(
             top, values=self._lang_labels_sorted, command=self._on_language_change
         )
@@ -604,7 +604,7 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self.lbl_pitch.configure(text=self._t("label_pitch"))
         self.btn_open_file.configure(text=self._t("btn_open_file"))
         self.chk_append.configure(text=self._t("chk_append"))
-        self.info_btn.configure(text=self._t("btn_info"))
+        self._refresh_menubar_labels()
 
         # 声タブの見出し（タブ名）を言語に合わせて貼り替える
         for _k in self._voice_tab_keys:
@@ -1320,6 +1320,44 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         """「保存した声」タブが選ばれているか。"""
         return self._active_voice_tab() == "saved"
 
+    # ---- メニューバー -------------------------------------------------------
+    def _build_menubar(self):
+        """ウィンドウ上部のメニューバーを作る。
+
+        構成：ヘルプ ＞ ［問題を報告 ／ ──区切り── ／ バージョン情報（About）］
+        ・問題を報告 … Google フォームを直接ブラウザで開く（_open_issue）
+        ・About      … アプリ名・バージョン・注意書きのダイアログ（_show_info）。一番下。
+        言語切り替え時にラベルを貼り替えられるよう、メニューを保持する。
+        """
+        # フォントは既定（TkMenuFont）のまま。Windows のメニューバー本体（"ヘルプ"）は
+        # OS が描画してサイズを変えられないため、ドロップダウンだけ拡大すると不揃いになる。
+        # ネイティブの tk メニュー（CTk は configure(menu=...) を Tk に通す）。
+        # tearoff=0 を付けないと index 0 がティアオフ線になり、entryconfigure(0) が
+        # カスケードでなくティアオフを指して "unknown option -label" で落ちる。
+        menubar = tk.Menu(self, tearoff=0)
+        help_menu = tk.Menu(menubar, tearoff=0)
+
+        # ヘルプ ＞ 問題を報告（押すと Google フォームを直接開く）
+        help_menu.add_command(label=self._t("menu_report"), command=self._open_issue)
+        help_menu.add_separator()
+        # ヘルプ ＞ バージョン情報（About）。区切り線の下＝一番下に配置。
+        help_menu.add_command(label=self._t("info_title"), command=self._show_info)
+        menubar.add_cascade(label=self._t("menu_help"), menu=help_menu)
+
+        self.configure(menu=menubar)
+        # 言語追従用に保持（各 entry の位置は固定）。
+        self._menubar = menubar
+        self._help_menu = help_menu
+
+    def _refresh_menubar_labels(self):
+        """表示言語が変わったらメニューのラベルを貼り替える。"""
+        if getattr(self, "_menubar", None) is None:
+            return
+        # index は _build_menubar の追加順（report=0 / separator=1 / about=2）。
+        self._menubar.entryconfigure(0, label=self._t("menu_help"))
+        self._help_menu.entryconfigure(0, label=self._t("menu_report"))
+        self._help_menu.entryconfigure(2, label=self._t("info_title"))
+
     # ---- 情報ダイアログ -----------------------------------------------------
     def _open_issue(self):
         """「問題を報告」：報告用の Google フォームを既定のブラウザで開く。"""
@@ -1361,11 +1399,9 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         # バージョン
         ctk.CTkLabel(body, text=f'{self._t("info_version")}: {APP_VERSION}',
                      anchor="w", text_color=("gray40", "gray60")).pack(anchor="w", pady=(10, 0))
-        # ボタン行：左「問題を報告」／右「閉じる」
+        # ボタン行：右「閉じる」のみ（問題報告は「お問い合わせ」ダイアログに移動）
         btn_row = ctk.CTkFrame(body, fg_color="transparent")
         btn_row.pack(fill="x", side="bottom")
-        ctk.CTkButton(btn_row, text=self._t("btn_report_issue"),
-                      command=self._open_issue).pack(side="left")
         ctk.CTkButton(btn_row, text=self._t("btn_close"),
                       command=win.destroy).pack(side="right")
 
