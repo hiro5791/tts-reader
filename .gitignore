@@ -66,6 +66,7 @@ settings.local.json
 
 # ===== exe化（PyInstaller）=====
 *.spec
+!MultiVoiceStudio.spec
 build/
 dist/
 
