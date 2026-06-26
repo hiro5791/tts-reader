@@ -11,6 +11,7 @@ dist/
 
 # ===== 仮想環境 =====
 .venv/
+.venv-build/
 venv/
 env/
 ENV/
@@ -69,6 +70,9 @@ settings.local.json
 !MultiVoiceStudio.spec
 build/
 dist/
+
+# ===== ビルド作業ログ（pip/prefetch 等の一時ログ。コミット不要）=====
+_build_*.log
 
 # ===== OS =====
 .DS_Store

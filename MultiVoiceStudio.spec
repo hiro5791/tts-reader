@@ -51,16 +51,24 @@ if _notices.exists():
     datas.append((str(_notices), "."))
 
 # 同梱モデル（HuggingFace キャッシュ）。
-#   事前に  HF_HOME=<models>  python scripts/prefetch_models.py  で集めておく。
-#   置き場所は環境変数 MVS_MODELS_DIR で差し替え可能（C: の容量が無いとき D: 等に置く）。
-#   実行時は app.py 側で HF_HOME を同梱 models/ に向け、MVS_OFFLINE=1 にする（配布手順書参照）。
+#   ★既定は「非同梱」★（Microsoft Store 提出版＝約3GB・初回起動時に HF からDL）。
+#   モデルを同梱した「オフライン動作版（約15-18GB）」が必要なときだけ、
+#   環境変数 MVS_BUNDLE_MODELS=1 を明示的に立ててビルドする。
+#     事前に  HF_HOME=<models>  python scripts/prefetch_models.py  で集めておく。
+#     置き場所は MVS_MODELS_DIR で差し替え可能（既定 ROOT/models）。
+#   ※「models/ があれば自動同梱」だと、開発で prefetch しただけで巨大MSIXが
+#     できてしまい事故るため、明示オプトインにしている（再発防止）。
+_bundle_models = os.environ.get("MVS_BUNDLE_MODELS", "").strip().lower() in ("1", "true", "yes", "on")
 _models_env = os.environ.get("MVS_MODELS_DIR")
 _models = Path(_models_env) if _models_env else (ROOT / "models")
-if _models.exists():
+if _bundle_models and _models.exists():
     datas.append((str(_models), "models"))
-    print(f"[spec] モデルを同梱します: {_models}")
+    print(f"[spec] モデルを同梱します（MVS_BUNDLE_MODELS=1・オフライン版・約15-18GB）: {_models}")
+elif _bundle_models:
+    print(f"[spec] 警告: MVS_BUNDLE_MODELS=1 ですが {_models} が無いため非同梱でビルドします。")
 else:
-    print(f"[spec] モデル未同梱（{_models} が無い）。配布版はオフライン動作しません。")
+    print("[spec] モデル非同梱（Store提出と同じ約3GB構成・実行時にHFからDL）。"
+          "オフライン同梱版が要るときは MVS_BUNDLE_MODELS=1 を設定して再ビルド。")
 
 # --- 解析 ---------------------------------------------------------------------
 a = Analysis(
