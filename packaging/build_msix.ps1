@@ -54,7 +54,11 @@ $verFile = Join-Path (Split-Path -Parent $pkgDir) "version.txt"
 if (Test-Path $verFile) {
     $ver = (Get-Content $verFile -Raw).Trim()
     $manifestDst = Join-Path $DistDir "AppxManifest.xml"
-    $mtext = (Get-Content $manifestDst -Raw) -replace '(?<=\s)Version="[0-9][0-9.]*"', ('Version="' + $ver + '"')
+    # NOTE: use -creplace (case-SENSITIVE). Plain -replace is case-insensitive and
+    # would also rewrite the XML declaration's lowercase version="1.0" into
+    # Version="x.y.z", producing an invalid <?xml ...?> that makeappx rejects
+    # (C00CEE40, Line 1). Only the capital-V Version="" on <Identity> must change.
+    $mtext = (Get-Content $manifestDst -Raw) -creplace '(?<=\s)Version="[0-9][0-9.]*"', ('Version="' + $ver + '"')
     [System.IO.File]::WriteAllText($manifestDst, $mtext, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Stamped AppxManifest Version = $ver (from version.txt)"
 } else { Write-Host "WARNING: version.txt not found; using AppxManifest as-is." }
