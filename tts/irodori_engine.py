@@ -223,10 +223,23 @@ def _run_infer_inproc(checkpoint: str, text: str, voice_args: list[str],
     #   アクセス違反でクラッシュする。8GB級GPUでは特に重要。）
     import gc
     try:
-        del result
+        del result            # 生成結果テンソルを先に手放す
+    except Exception:
+        pass
+    try:
+        # model/tokenizer/codec を「gc待ち」に頼らず確定的に解放する。
+        # del runtime だけだと参照が残る/回収が遅れることがあり、切替のたびに
+        # VRAM/RAM が積み上がって「どんどん重くなる」原因になっていた。
+        runtime.unload()
+    except Exception:
+        pass
+    try:
         del runtime
     except Exception:
         pass
+    # 注: このアプリは from_key() を直接使うためランタイムキャッシュは常に空で、
+    #     clear_cached_runtime() は実質no-op。将来 get_cached_runtime() 経由に
+    #     変えても効くよう呼び出しは残す（実解放は上の unload() が担う）。
     try:
         from irodori_tts.inference_runtime import clear_cached_runtime
         clear_cached_runtime()
@@ -236,7 +249,9 @@ def _run_infer_inproc(checkpoint: str, text: str, voice_args: list[str],
     try:
         import torch
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            torch.cuda.synchronize()   # 実行中のGPU処理を終わらせてから
+            torch.cuda.empty_cache()   # 未使用の予約ブロックをドライバへ返す
+            torch.cuda.ipc_collect()
     except Exception:
         pass
     return str(out_path)

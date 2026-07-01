@@ -73,7 +73,9 @@ def _free_models(keep: str | None = None) -> None:
     try:
         import torch
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            torch.cuda.synchronize()   # 実行中のGPU処理を終わらせてから
+            torch.cuda.empty_cache()   # 未使用の予約ブロックをドライバへ返す
+            torch.cuda.ipc_collect()   # 断片化して残りがちな分も回収
     except Exception:
         pass
 
