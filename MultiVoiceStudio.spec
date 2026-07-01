@@ -56,9 +56,10 @@ if _ver.exists():
     datas.append((str(_ver), "."))
 
 # 同梱モデル（HuggingFace キャッシュ）。
-#   ★既定は「非同梱」★（Microsoft Store 提出版＝約3GB・初回起動時に HF からDL）。
-#   モデルを同梱した「オフライン動作版（約15-18GB）」が必要なときだけ、
-#   環境変数 MVS_BUNDLE_MODELS=1 を明示的に立ててビルドする。
+#   ★この spec の既定は「非同梱」★（開発 prefetch だけで巨大MSIXを誤って作らないため）。
+#   ただし実際の Microsoft Store 提出版は「モデル同梱のオフライン版（約17-18GB）」で、
+#   環境変数 MVS_BUNDLE_MODELS=1 を立ててビルドしている（非同梱だと初回起動時に HF から
+#   DL が必要でオフライン動作しないため、提出版は同梱を採用）。
 #     事前に  HF_HOME=<models>  python scripts/prefetch_models.py  で集めておく。
 #     置き場所は MVS_MODELS_DIR で差し替え可能（既定 ROOT/models）。
 #   ※「models/ があれば自動同梱」だと、開発で prefetch しただけで巨大MSIXが
@@ -72,8 +73,8 @@ if _bundle_models and _models.exists():
 elif _bundle_models:
     print(f"[spec] 警告: MVS_BUNDLE_MODELS=1 ですが {_models} が無いため非同梱でビルドします。")
 else:
-    print("[spec] モデル非同梱（Store提出と同じ約3GB構成・実行時にHFからDL）。"
-          "オフライン同梱版が要るときは MVS_BUNDLE_MODELS=1 を設定して再ビルド。")
+    print("[spec] モデル非同梱（約3GB・実行時にHFからDL）。"
+          "ストア提出版は同梱版なので、提出用ビルドは MVS_BUNDLE_MODELS=1 を設定すること。")
 
 # --- 解析 ---------------------------------------------------------------------
 a = Analysis(
