@@ -50,6 +50,69 @@ for _stream in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# ---- クラッシュ記録（原因究明用）-------------------------------------------
+# 配布版(GUI/コンソール無し)は、ネイティブな致命傷（セグフォ/不正命令/メモリ確保失敗の
+# abort 等）や未捕捉例外が起きても画面にもログにも何も残らず「無言で落ちる」。
+# そこで faulthandler でネイティブ致命傷も含め、落ちた箇所のスタックをファイルに残す。
+# 出力先（書込可）: %LOCALAPPDATA%\MultiVoiceStudio\logs\crash.log（frozen時）。
+try:
+    import faulthandler as _faulthandler
+    from tts.paths import data_root as _data_root
+
+    _log_dir = _data_root() / "logs"
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _crash_fp = open(_log_dir / "crash.log", "a", encoding="utf-8", buffering=1)
+    _crash_fp.write(
+        f"\n==== start {_dt.datetime.now():%Y-%m-%d %H:%M:%S} "
+        f"frozen={getattr(sys, 'frozen', False)} ====\n"
+    )
+    try:
+        import platform as _platform
+        _ram = ""
+        try:
+            import ctypes as _ct
+
+            class _MSX(_ct.Structure):
+                _fields_ = [("l", _ct.c_ulong), ("load", _ct.c_ulong),
+                            ("tot", _ct.c_ulonglong), ("av", _ct.c_ulonglong),
+                            ("tp", _ct.c_ulonglong), ("ap", _ct.c_ulonglong),
+                            ("tv", _ct.c_ulonglong), ("avv", _ct.c_ulonglong),
+                            ("ae", _ct.c_ulonglong)]
+            _m = _MSX(); _m.l = _ct.sizeof(_MSX)
+            if _ct.windll.kernel32.GlobalMemoryStatusEx(_ct.byref(_m)):
+                _ram = f" ram_total={_m.tot/1024**3:.1f}GB ram_avail={_m.av/1024**3:.1f}GB"
+        except Exception:
+            pass
+        _crash_fp.write(
+            f"python={sys.version.split()[0]} {_platform.platform()} "
+            f"cpu_count={os.cpu_count()}{_ram}\n"
+        )
+        _crash_fp.flush()
+    except Exception:
+        pass
+
+    # ネイティブ致命傷（SIGSEGV 等）で、全スレッドのPythonスタックを crash.log へ。
+    _faulthandler.enable(file=_crash_fp, all_threads=True)
+
+    # 未捕捉のPython例外（メイン/別スレッド）も記録する。
+    def _log_uncaught(exc_type, exc, tb):
+        try:
+            import traceback as _traceback
+            _crash_fp.write(f"---- uncaught {_dt.datetime.now():%Y-%m-%d %H:%M:%S} ----\n")
+            _traceback.print_exception(exc_type, exc, tb, file=_crash_fp)
+            _crash_fp.flush()
+        except Exception:
+            pass
+
+    sys.excepthook = _log_uncaught
+    try:
+        import threading as _threading
+        _threading.excepthook = lambda a: _log_uncaught(a.exc_type, a.exc_value, a.exc_traceback)
+    except Exception:
+        pass
+except Exception:
+    pass
+
 # 配布（PyInstaller）で同梱したモデルを使う。
 # frozen（exe化）かつ同梱 models/（HF キャッシュ）があれば、そこを HF_HOME に向け、
 # オフライン扱いにする（別PCでもネット無しで動く）。開発時（非frozen）は何もしない。
