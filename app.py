@@ -122,6 +122,14 @@ if getattr(sys, "frozen", False):
     if _bundled_models.exists():
         os.environ.setdefault("HF_HOME", str(_bundled_models))
         os.environ.setdefault("MVS_OFFLINE", "1")
+else:
+    # 開発時（非frozen）: プロジェクト直下に完全な models/（HFキャッシュ）が
+    # あれば、そこを既定の HF_HOME にする。これで `python app.py` を HF_HOME 無指定で
+    # 起動しても同梱の完全モデルを使い、既定キャッシュの未完成DLで固まらない。
+    # （HF_HOME を明示指定した場合はそれを尊重＝setdefault）
+    _local_models = Path(__file__).resolve().parent / "models"
+    if (_local_models / "hub").exists():
+        os.environ.setdefault("HF_HOME", str(_local_models))
 
 # オフライン同梱配布用：MVS_OFFLINE=1 のとき、モデルのダウンロードを試みず
 # ローカルキャッシュだけを使う（ネットが無くても起動・生成できる）。
@@ -345,6 +353,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._status_params: dict = {}
         self._status_error = False
 
+        # 日本語入力で文字サイズがばらつく問題への対処。CustomTkinter の既定
+        # フォント Roboto には日本語グリフが無く、日本語を入れると Tk が別のCJK
+        # フォントへ差し替えるため同じポイント数でも大きく見える。UI 既定フォントを
+        # 日本語対応フォントにそろえて解消する（_build_widgets の前に設定する）。
+        self._apply_ui_font()
         self._build_widgets()
         # 声：保存値がそのエンジンに存在すればそれ、無ければ既定にフォールバック。
         self._refresh_voices(self._engine, preferred=self._settings.get("voice"))
@@ -445,6 +458,24 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
 
+    def _apply_ui_font(self):
+        """UIウィジェットの既定フォントを日本語対応フォントにそろえる。
+
+        CustomTkinter の既定は Roboto（日本語グリフ無し）。日本語を入力すると Tk が
+        別のCJKフォントへ差し替え、同じポイント数でも大きく見えてサイズがばらつく。
+        Latin と日本語を1つのフォントで描く Windows 標準のUIフォントに統一する。
+        インストール済みのものを優先順に選び、どれも無ければ既定のまま（悪化しない）。
+        """
+        try:
+            import tkinter.font as tkfont
+            available = set(tkfont.families())
+            for fam in ("Yu Gothic UI", "Meiryo UI", "Yu Gothic", "Meiryo", "MS Gothic"):
+                if fam in available:
+                    ctk.ThemeManager.theme["CTkFont"]["family"] = fam
+                    break
+        except Exception:
+            pass
+
     # ---- 画面の組み立て -----------------------------------------------------
     def _build_widgets(self):
 
@@ -528,8 +559,10 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         design_tab = self.voice_tabview.tab(self._voice_tab_names["tab_design"])
         self.lbl_design = ctk.CTkLabel(design_tab, text="")
         self.lbl_design.pack(anchor="w", padx=4, pady=(4, 0))
-        self.design_box = ctk.CTkTextbox(design_tab, height=64, wrap="word")
-        self.design_box.pack(fill="x", padx=4, pady=(2, 4))
+        # 声の説明は複数行書けるよう、タブ内の空きスペースを埋めて広く取る
+        # （固定 height=64 だと3行ぶんしか見えず窮屈だった）。
+        self.design_box = ctk.CTkTextbox(design_tab, height=130, wrap="word")
+        self.design_box.pack(fill="both", expand=True, padx=4, pady=(2, 4))
 
         # --- 保存した声タブ（Qwen/Irodori 両対応）---
         saved_tab = self.voice_tabview.tab(self._voice_tab_names["tab_saved"])
@@ -1566,6 +1599,11 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         except Exception:
             pass
         self.destroy()
+        # torch+CUDA / PortAudio(sounddevice) を積んだGUIは、通常のインタプリタ
+        # 終了処理だと後始末が長時間化・ハングし、数GBのモデルを抱えたまま
+        # プロセスが居残る（＝終了後もPCが重い）。設定は上で保存済みなので、
+        # ここで確実にプロセスを落として OS に全メモリ(VRAM/RAM)を即時回収させる。
+        os._exit(0)
 
 
 if __name__ == "__main__":
