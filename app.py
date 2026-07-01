@@ -186,7 +186,18 @@ AUDIO_LANG_TO_I18N = {
 
 # アプリ名・バージョン・問題報告先（情報ダイアログで使う）
 APP_NAME = "Multi Voice Studio"
-APP_VERSION = "1.0.0"
+
+
+def _read_app_version() -> str:
+    """version.txt(???????)????????????????_MEIPASS?dev?app.py??????"""
+    try:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        return (base / "version.txt").read_text(encoding="utf-8").strip() or "0.0.0.0"
+    except Exception:
+        return "0.0.0.0"
+
+
+APP_VERSION = _read_app_version()
 # 「問題を報告」ボタンから開く Google フォーム
 REPORT_FORM_URL = "https://forms.gle/7ci3VpBVVA4jcw8U7"
 

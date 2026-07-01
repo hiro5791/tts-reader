@@ -10,6 +10,7 @@
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
   IgnorableNamespaces="uap rescap">
 
+  <!-- Version ? version.txt ??????build_msix.ps1 ???????????? -->
   <Identity
     Name="9B6C9F60.MultiVoiceStudio"
     Publisher="CN=E5A55C73-7E5B-4BF9-B37E-C562F23A3A5E"

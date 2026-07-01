@@ -13,7 +13,7 @@
 ; ============================================================================
 
 #define MyAppName "Multi Voice Studio"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion Trim(FileRead(FileOpen("..\version.txt")))
 #define MyAppPublisher "Hiroyura"
 #define MyAppExe "MultiVoiceStudio.exe"
 #define SourceDir "F:\mvs-build\dist\MultiVoiceStudio"

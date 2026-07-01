@@ -50,6 +50,11 @@ _notices = ROOT / "THIRD-PARTY-NOTICES.md"
 if _notices.exists():
     datas.append((str(_notices), "."))
 
+# version.txt(?????)???????? app.py ????
+_ver = ROOT / "version.txt"
+if _ver.exists():
+    datas.append((str(_ver), "."))
+
 # 同梱モデル（HuggingFace キャッシュ）。
 #   ★既定は「非同梱」★（Microsoft Store 提出版＝約3GB・初回起動時に HF からDL）。
 #   モデルを同梱した「オフライン動作版（約15-18GB）」が必要なときだけ、

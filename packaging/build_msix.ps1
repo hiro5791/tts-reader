@@ -49,6 +49,15 @@ if (-not (Test-Path $DistDir)) { throw "dist folder not found: $DistDir" }
 # --- 2) Copy manifest + icons into dist ---
 Write-Host "Copying AppxManifest.xml and Assets into dist..."
 Copy-Item (Join-Path $pkgDir "AppxManifest.xml") (Join-Path $DistDir "AppxManifest.xml") -Force
+# Stamp version from single source (version.txt) into the copied manifest.
+$verFile = Join-Path (Split-Path -Parent $pkgDir) "version.txt"
+if (Test-Path $verFile) {
+    $ver = (Get-Content $verFile -Raw).Trim()
+    $manifestDst = Join-Path $DistDir "AppxManifest.xml"
+    $mtext = (Get-Content $manifestDst -Raw) -replace '(?<=\s)Version="[0-9][0-9.]*"', ('Version="' + $ver + '"')
+    [System.IO.File]::WriteAllText($manifestDst, $mtext, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "Stamped AppxManifest Version = $ver (from version.txt)"
+} else { Write-Host "WARNING: version.txt not found; using AppxManifest as-is." }
 $assetsSrc = Join-Path $pkgDir "Assets"
 $assetsDst = Join-Path $DistDir "Assets"
 if (-not (Test-Path $assetsSrc)) { throw "Assets missing. Run: python scripts\make_msix_assets.py" }
