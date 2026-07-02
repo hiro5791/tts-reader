@@ -1072,29 +1072,32 @@ class TTSApp(ctk.CTk, TkinterDnD.DnDWrapper):
         self._mvsvoice_cache = (path, ref_wav, ref_text, language)
         return ref_wav, ref_text, language
 
-    # ---- 音声を保存する（読み上げた音声を wav と mp3 で書き出す）-----------
+    # ---- 音声を保存する（選んだ拡張子の1ファイルで書き出す）---------------
     def _on_save_audio_file(self):
-        """直近に生成した読み上げ音声を、wav と mp3 の両方で保存する。"""
+        """直近に生成した読み上げ音声を、選んだ拡張子（.wav か .mp3）で1つだけ保存する。"""
         if self._wav_data is None or not self.current_wav:
             self._set_status("save_audio_no_audio", error=True)
             return
         path = filedialog.asksaveasfilename(
-            parent=self, title=self._t("btn_save_audio_file"), defaultextension=".wav",
-            filetypes=[("WAV / MP3", "*.wav *.mp3"), (self._t("ft_all"), "*.*")],
+            parent=self, title=self._t("btn_save_audio_file"), defaultextension=".mp3",
+            filetypes=[("MP3", "*.mp3"), ("WAV", "*.wav"), (self._t("ft_all"), "*.*")],
         )
         if not path:
             return
         import soundfile as sf
-        base = Path(path).with_suffix("")   # 拡張子を外し、wav と mp3 を並べて書き出す
-        wav_path = str(base) + ".wav"
-        mp3_path = str(base) + ".mp3"
+        # ユーザーが選んだ拡張子で1ファイルだけ書き出す（.wav なら WAV、それ以外は既定の MP3）。
+        if Path(path).suffix.lower() == ".wav":
+            out_path = path
+            write_kwargs = {}
+        else:
+            out_path = str(Path(path).with_suffix(".mp3"))
+            write_kwargs = {"format": "MP3"}
         try:
-            sf.write(wav_path, self._wav_data, self._wav_sr)
-            sf.write(mp3_path, self._wav_data, self._wav_sr, format="MP3")
+            sf.write(out_path, self._wav_data, self._wav_sr, **write_kwargs)
         except Exception as e:
             self._set_status("save_audio_error", error=True, msg=str(e))
             return
-        self._set_status("save_audio_done", path=str(base))
+        self._set_status("save_audio_done", path=out_path)
 
     # ---- 声を保存する（.mvsvoice として書き出す）---------------------------
     def _on_save_voice_file(self):
